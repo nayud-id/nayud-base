@@ -16,13 +16,18 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+
+    // Optional: enable Aerospike C client integration and specify include/lib directories.
+    const enable_aero = b.option(bool, "aerospike", "Enable Aerospike C client integration.") orelse false;
+    const aerospike_include_dir = b.option([]const u8, "aerospike_include_dir", "Path to Aerospike C client headers (optional).");
+    const aerospike_lib_dir = b.option([]const u8, "aerospike_lib_dir", "Path to Aerospike C client libraries (optional).");
+
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
     // This creates a module, which represents a collection of source files alongside
-    // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
     // addModule defines a module that we intend to make available for importing
     // to our consumers. We must give it a name because a Zig package can expose
@@ -41,12 +46,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // Create build options and propagate to modules.
+    const build_opts = b.addOptions();
+    build_opts.addOption(bool, "aerospike", enable_aero);
+    mod.addOptions("build_options", build_opts);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
     // business logic and the CLI into two separate modules.
     //
-    // If your goal is to create a Zig library for others to use, consider if
     // it might benefit from also exposing a CLI tool. A parser library for a
     // data serialization format could also bundle a CLI syntax checker, for example.
     //
@@ -70,7 +79,6 @@ pub fn build(b: *std.Build) void {
             // definition if desireable (e.g. firmware for embedded devices).
             .target = target,
             .optimize = optimize,
-            // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
                 // Here "nayud_base" is the name you will use in your source code to
@@ -82,6 +90,35 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+
+    // Expose build options to the executable's root module as well.
+    exe.root_module.addOptions("build_options", build_opts);
+
+    // Conditionally wire Aerospike C client include/lib paths and linking.
+    if (enable_aero) {
+        if (aerospike_include_dir) |inc| {
+            mod.addIncludePath(b.path(inc));
+            exe.root_module.addIncludePath(b.path(inc));
+        } else {
+            // Common Homebrew default on macOS (Apple Silicon)
+            mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+            exe.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+            // Fallback for Intel macOS/Homebrew
+            mod.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+            exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+        }
+        if (aerospike_lib_dir) |libd| {
+            mod.addLibraryPath(b.path(libd));
+            exe.root_module.addLibraryPath(b.path(libd));
+        } else {
+            mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+            exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+            mod.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+            exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+        }
+        mod.linkSystemLibrary("aerospike", .{});
+        exe.root_module.linkSystemLibrary("aerospike", .{});
+    }
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -132,8 +169,34 @@ pub fn build(b: *std.Build) void {
         .root_module = exe.root_module,
     });
 
-    // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
+
+    // Propagate build options and (optionally) Aerospike linking to test executables.
+    mod_tests.root_module.addOptions("build_options", build_opts);
+    exe_tests.root_module.addOptions("build_options", build_opts);
+
+    if (enable_aero) {
+        if (aerospike_include_dir) |inc| {
+            mod_tests.root_module.addIncludePath(b.path(inc));
+            exe_tests.root_module.addIncludePath(b.path(inc));
+        } else {
+            mod_tests.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+            exe_tests.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+            mod_tests.root_module.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+            exe_tests.root_module.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+        }
+        if (aerospike_lib_dir) |libd| {
+            mod_tests.root_module.addLibraryPath(b.path(libd));
+            exe_tests.root_module.addLibraryPath(b.path(libd));
+        } else {
+            mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+            exe_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+            mod_tests.root_module.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+            exe_tests.root_module.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+        }
+        mod_tests.root_module.linkSystemLibrary("aerospike", .{});
+        exe_tests.root_module.linkSystemLibrary("aerospike", .{});
+    }
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
