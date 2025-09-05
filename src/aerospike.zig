@@ -97,6 +97,41 @@ pub const Config = struct {
 
 pub const Seed = struct { host: []const u8, port: u16 = 3000 };
 
+// New: top-level Side enum used for dual-cluster operations and repair items
+pub const Side = enum { primary, secondary };
+
+// New: Repair operation and item types for deferred reconciliation
+pub const RepairOp = union(enum) {
+    put: struct {
+        bin_name: []u8,
+        value: Value,
+    },
+    incr: struct {
+        bin_name: []u8,
+        delta: i64,
+    },
+};
+
+pub const RepairItem = struct {
+    ts_ms: u64,
+    failed_side: Side,
+    ns: []u8,
+    set: []u8,
+    key: []u8,
+    op: RepairOp,
+    err: Error,
+
+    pub fn deinit(self: *RepairItem, allocator: std.mem.Allocator) void {
+        allocator.free(self.ns);
+        allocator.free(self.set);
+        allocator.free(self.key);
+        switch (self.op) {
+            .put => |*p| allocator.free(p.bin_name),
+            .incr => |*i| allocator.free(i.bin_name),
+        }
+    }
+};
+
 // Select implementation based on build flag. When Aerospike C client headers/libs
 // are not available, provide a no-op stub implementation that compiles.
 pub const Client = if (build_options.aerospike) RealClient else DummyClient;
@@ -129,14 +164,18 @@ pub const ClusterHealth = struct {
 };
 
 pub const DualClient = struct {
-    pub const Side = enum { primary, secondary };
-
     allocator: std.mem.Allocator,
     primary: Client,
     secondary: Client,
     primary_health: ClusterHealth = .{},
     secondary_health: ClusterHealth = .{},
     cfg: Config,
+
+    // New: repair queue and mutex for thread-safe enqueuing/dequeuing
+    repair_queue: std.ArrayList(RepairItem),
+    mutex: std.Thread.Mutex = .{},
+
+    const MAX_REPAIR_QUEUE: usize = 4096;
 
     fn nowMs() u64 {
         // milliTimestamp returns i128; clamp to u64 for storage
@@ -162,6 +201,7 @@ pub const DualClient = struct {
             .primary = p,
             .secondary = s,
             .cfg = cfg,
+            .repair_queue = std.ArrayList(RepairItem).init(allocator),
         };
         // Initial health marks as success at creation time
         const now = nowMs();
@@ -171,6 +211,9 @@ pub const DualClient = struct {
     }
 
     pub fn close(self: *DualClient) void {
+        // Free queued repair items
+        self.freeRepairQueue();
+        self.repair_queue.deinit();
         self.primary.close();
         self.secondary.close();
     }
@@ -194,21 +237,80 @@ pub const DualClient = struct {
         };
     }
 
+    // New: synchronous dual-write using parallel sends. Require both ACKs for success.
     pub fn putBoth(self: *DualClient, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, value: Value) Error!void {
-        var err_p: ?Error = null;
-        var err_s: ?Error = null;
+        const ThreadResult = struct { ok: bool = false, err: ?Error = null };
+        var r_p: ThreadResult = .{};
+        var r_s: ThreadResult = .{};
 
-        self.primary.put(ns, set, key, bin_name, value) catch |e| {
-            err_p = e;
+        const workerPut = struct {
+            fn run(client: *Client, ns_: []const u8, set_: []const u8, key_: []const u8, bin_: []const u8, val_: Value, out: *ThreadResult) void {
+                out.* = .{};
+                client.put(ns_, set_, key_, bin_, val_) catch |e| {
+                    out.ok = false;
+                    out.err = e;
+                    return;
+                };
+                out.ok = true;
+            }
         };
-        self.recordResult(.primary, err_p == null);
 
-        self.secondary.put(ns, set, key, bin_name, value) catch |e| {
-            err_s = e;
+        var t1 = try std.Thread.spawn(.{}, workerPut.run, .{ &self.primary, ns, set, key, bin_name, value, &r_p });
+        var t2 = try std.Thread.spawn(.{}, workerPut.run, .{ &self.secondary, ns, set, key, bin_name, value, &r_s });
+        t1.join();
+        t2.join();
+
+        // Record health based on results
+        self.recordResult(.primary, r_p.ok);
+        self.recordResult(.secondary, r_s.ok);
+
+        if (r_p.ok and r_s.ok) return;
+
+        // If partial failure, enqueue repair for the side that failed
+        if (r_p.ok and !r_s.ok) {
+            self.enqueueRepairPut(.secondary, ns, set, key, bin_name, value, r_s.err orelse Error.OperationFailed);
+        } else if (!r_p.ok and r_s.ok) {
+            self.enqueueRepairPut(.primary, ns, set, key, bin_name, value, r_p.err orelse Error.OperationFailed);
+        }
+
+        return Error.OperationFailed;
+    }
+
+    // New: synchronous dual-operate (increment) using parallel sends. Require both ACKs.
+    pub fn operateIncrBoth(self: *DualClient, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, delta: i64) Error!void {
+        const ThreadResult = struct { ok: bool = false, err: ?Error = null };
+        var r_p: ThreadResult = .{};
+        var r_s: ThreadResult = .{};
+
+        const workerOp = struct {
+            fn run(client: *Client, ns_: []const u8, set_: []const u8, key_: []const u8, bin_: []const u8, d: i64, out: *ThreadResult) void {
+                out.* = .{};
+                client.operateIncr(ns_, set_, key_, bin_, d) catch |e| {
+                    out.ok = false;
+                    out.err = e;
+                    return;
+                };
+                out.ok = true;
+            }
         };
-        self.recordResult(.secondary, err_s == null);
 
-        if (err_p != null or err_s != null) return Error.OperationFailed;
+        var t1 = try std.Thread.spawn(.{}, workerOp.run, .{ &self.primary, ns, set, key, bin_name, delta, &r_p });
+        var t2 = try std.Thread.spawn(.{}, workerOp.run, .{ &self.secondary, ns, set, key, bin_name, delta, &r_s });
+        t1.join();
+        t2.join();
+
+        self.recordResult(.primary, r_p.ok);
+        self.recordResult(.secondary, r_s.ok);
+
+        if (r_p.ok and r_s.ok) return;
+
+        if (r_p.ok and !r_s.ok) {
+            self.enqueueRepairIncr(.secondary, ns, set, key, bin_name, delta, r_s.err orelse Error.OperationFailed);
+        } else if (!r_p.ok and r_s.ok) {
+            self.enqueueRepairIncr(.primary, ns, set, key, bin_name, delta, r_p.err orelse Error.OperationFailed);
+        }
+
+        return Error.OperationFailed;
     }
 
     pub fn getFrom(self: *DualClient, side: Side, ns: []const u8, set: []const u8, key: []const u8) Error!void {
@@ -219,6 +321,81 @@ pub const DualClient = struct {
             if (!ok) return e;
         };
         self.recordResult(side, ok);
+    }
+
+    fn dup(self: *DualClient, s: []const u8) ![]u8 {
+        const buf = try self.allocator.alloc(u8, s.len);
+        std.mem.copy(u8, buf, s);
+        return buf;
+    }
+
+    fn enqueueRepairPut(self: *DualClient, failed_side: Side, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, value: Value, err: Error) void {
+        var item = RepairItem{
+            .ts_ms = nowMs(),
+            .failed_side = failed_side,
+            .ns = self.dup(ns) catch return,
+            .set = self.dup(set) catch return,
+            .key = self.dup(key) catch return,
+            .op = .{ .put = .{ .bin_name = self.dup(bin_name) catch return, .value = value } },
+            .err = err,
+        };
+        self.enqueueRepair(item) catch {
+            // On enqueue failure, free owned memory to avoid leak
+            item.deinit(self.allocator);
+        };
+    }
+
+    fn enqueueRepairIncr(self: *DualClient, failed_side: Side, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, delta: i64, err: Error) void {
+        var item = RepairItem{
+            .ts_ms = nowMs(),
+            .failed_side = failed_side,
+            .ns = self.dup(ns) catch return,
+            .set = self.dup(set) catch return,
+            .key = self.dup(key) catch return,
+            .op = .{ .incr = .{ .bin_name = self.dup(bin_name) catch return, .delta = delta } },
+            .err = err,
+        };
+        self.enqueueRepair(item) catch {
+            item.deinit(self.allocator);
+        };
+    }
+
+    fn enqueueRepair(self: *DualClient, item: RepairItem) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.repair_queue.items.len >= MAX_REPAIR_QUEUE) {
+            // Drop oldest to make room
+            var old = self.repair_queue.items[0];
+            _ = self.repair_queue.orderedRemove(0);
+            old.deinit(self.allocator);
+        }
+        try self.repair_queue.append(item);
+    }
+
+    pub fn nextRepair(self: *DualClient) ?RepairItem {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.repair_queue.items.len == 0) return null;
+        const item = self.repair_queue.items[0];
+        _ = self.repair_queue.orderedRemove(0);
+        return item;
+    }
+
+    pub fn pendingRepairs(self: *DualClient) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.repair_queue.items.len;
+    }
+
+    fn freeRepairQueue(self: *DualClient) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var i: usize = 0;
+        while (i < self.repair_queue.items.len) : (i += 1) {
+            var it = &self.repair_queue.items[i];
+            it.deinit(self.allocator);
+        }
+        self.repair_queue.clearRetainingCapacity();
     }
 };
 
