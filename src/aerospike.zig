@@ -16,12 +16,96 @@ pub const Value = union(enum) {
     // Extend with more variants (str, bytes, float, bool) as needed.
 };
 
+// High-level client configuration (policies + socket) exposed to consumers.
+pub const Replica = enum { master, any };
+pub const ConsistencyLevel = enum { one, all };
+pub const CommitLevel = enum { commit_all, commit_master };
+pub const GenerationPolicy = enum { none, eq, gt };
+
+pub const Timeouts = struct {
+    connect_ms: u32 = 500,
+    read_ms: u32 = 15,
+    write_ms: u32 = 15,
+    total_ms: u32 = 10_000,
+};
+
+pub const Retries = struct {
+    max_retries: u32 = 2,
+    sleep_between_retries_ms: u32 = 10,
+    retry_on_timeout: bool = true,
+};
+
+pub const ReadPolicy = struct {
+    replica: Replica = .master,
+    consistency_level: ConsistencyLevel = .one,
+    allow_partial_results: bool = false,
+};
+
+pub const WritePolicy = struct {
+    commit_level: CommitLevel = .commit_all,
+    generation_policy: GenerationPolicy = .none,
+    durable_delete: bool = false,
+    send_key: bool = true,
+};
+
+pub const BatchPolicy = struct {
+    max_concurrency: u32 = 64,
+    allow_inline: bool = true,
+    send_set_name: bool = false,
+    max_retries: u32 = 2,
+    sleep_between_retries_ms: u32 = 10,
+};
+
+pub const ScanPolicy = struct {
+    // Extend with scan-specific knobs later as needed
+    // Placeholder keeps interface consistent
+    _reserved: u8 = 0,
+};
+
+pub const QueryPolicy = struct {
+    // Extend with query-specific knobs later as needed
+    _reserved: u8 = 0,
+};
+
+pub const AdminPolicy = struct {
+    // Extend with admin-specific knobs later as needed
+    _reserved: u8 = 0,
+};
+
+pub const SocketPolicy = struct {
+    max_connections_per_node: u32 = 300,
+    connection_idle_timeout_ms: u32 = 60_000,
+    login_timeout_ms: u32 = 5_000,
+};
+
+pub const ClientPolicies = struct {
+    timeouts: Timeouts = .{},
+    retries: Retries = .{},
+    read: ReadPolicy = .{},
+    write: WritePolicy = .{},
+    batch: BatchPolicy = .{},
+    scan: ScanPolicy = .{},
+    query: QueryPolicy = .{},
+    admin: AdminPolicy = .{},
+    socket: SocketPolicy = .{},
+};
+
+pub const Config = struct {
+    // Namespaces/sets are app-level and not included here; this is transport + policy config.
+    policies: ClientPolicies = .{},
+};
+
+pub const Seed = struct { host: []const u8, port: u16 = 3000 };
+
 // Select implementation based on build flag. When Aerospike C client headers/libs
 // are not available, provide a no-op stub implementation that compiles.
 pub const Client = if (build_options.aerospike) RealClient else DummyClient;
 
 const DummyClient = struct {
     pub fn connect(_: std.mem.Allocator, _: []const u8, _: u16) Error!DummyClient {
+        return Error.AerospikeDisabled;
+    }
+    pub fn connectWithConfig(_: std.mem.Allocator, _: []const Seed, _: Config) Error!DummyClient {
         return Error.AerospikeDisabled;
     }
     pub fn close(_: *DummyClient) void {}
@@ -42,10 +126,11 @@ const DummyClient = struct {
     }
 };
 
-const RealClient = struct {
+const RealClient = if (build_options.aerospike) struct {
     const c = @cImport({
         @cInclude("aerospike/aerospike.h");
         @cInclude("aerospike/as_config.h");
+        @cInclude("aerospike/as_policy.h");
         @cInclude("aerospike/aerospike_key.h");
         @cInclude("aerospike/as_record.h");
         @cInclude("aerospike/as_key.h");
@@ -66,17 +151,136 @@ const RealClient = struct {
         return @ptrCast(buf[0..s.len :0]);
     }
 
+    fn setIfField(comptime T: type, ptr: anytype, comptime name: []const u8, value: anytype) void {
+        if (@hasField(T, name)) {
+            @field(ptr.*, name) = value;
+        }
+    }
+
+    fn mapReplica(rep: Replica) c.as_policy_replica {
+        return switch (rep) {
+            .master => c.AS_POLICY_REPLICA_MASTER,
+            .any => c.AS_POLICY_REPLICA_ANY,
+        };
+    }
+
+    fn mapConsistency(cns: ConsistencyLevel) c.as_policy_consistency_level {
+        return switch (cns) {
+            .one => c.AS_POLICY_CONSISTENCY_ONE,
+            .all => c.AS_POLICY_CONSISTENCY_ALL,
+        };
+    }
+
+    fn mapCommitLevel(cl: CommitLevel) c.as_policy_commit_level {
+        return switch (cl) {
+            .commit_all => c.AS_POLICY_COMMIT_LEVEL_ALL,
+            .commit_master => c.AS_POLICY_COMMIT_LEVEL_MASTER,
+        };
+    }
+
+    fn mapGenPolicy(gp: GenerationPolicy) c.as_policy_gen {
+        return switch (gp) {
+            .none => c.AS_POLICY_GEN_IGNORE,
+            .eq => c.AS_POLICY_GEN_EQ,
+            .gt => c.AS_POLICY_GEN_GT,
+        };
+    }
+
+    fn applyConfig(c_cfg: *c.as_config, cfg: Config) void {
+        // Socket/global settings
+        setIfField(@TypeOf(c_cfg.*), c_cfg, "conn_timeout_ms", cfg.policies.timeouts.connect_ms);
+        setIfField(@TypeOf(c_cfg.*), c_cfg, "login_timeout_ms", cfg.policies.socket.login_timeout_ms);
+        setIfField(@TypeOf(c_cfg.*), c_cfg, "max_conns_per_node", cfg.policies.socket.max_connections_per_node);
+        setIfField(@TypeOf(c_cfg.*), c_cfg, "conn_idle_ms", cfg.policies.socket.connection_idle_timeout_ms);
+
+        // Default policies present on as_config.policies
+        if (@hasField(@TypeOf(c_cfg.*), "policies")) {
+            const policies_ptr = &c_cfg.policies;
+
+            if (@hasField(@TypeOf(policies_ptr.*), "read")) {
+                const rp = &policies_ptr.read;
+                // timeouts
+                setIfField(@TypeOf(rp.*), rp, "total_timeout", cfg.policies.timeouts.read_ms);
+                // retries
+                setIfField(@TypeOf(rp.*), rp, "max_retries", cfg.policies.retries.max_retries);
+                setIfField(@TypeOf(rp.*), rp, "sleep_between_retries", cfg.policies.retries.sleep_between_retries_ms);
+                setIfField(@TypeOf(rp.*), rp, "retry_on_timeout", cfg.policies.retries.retry_on_timeout);
+                // booleans/enums
+                if (@hasField(@TypeOf(rp.*), "replica")) rp.replica = mapReplica(cfg.policies.read.replica);
+                if (@hasField(@TypeOf(rp.*), "consistency_level")) rp.consistency_level = mapConsistency(cfg.policies.read.consistency_level);
+                setIfField(@TypeOf(rp.*), rp, "allow_partial_results", cfg.policies.read.allow_partial_results);
+            }
+
+            if (@hasField(@TypeOf(policies_ptr.*), "write")) {
+                const wp = &policies_ptr.write;
+                setIfField(@TypeOf(wp.*), wp, "total_timeout", cfg.policies.timeouts.write_ms);
+                setIfField(@TypeOf(wp.*), wp, "max_retries", cfg.policies.retries.max_retries);
+                setIfField(@TypeOf(wp.*), wp, "sleep_between_retries", cfg.policies.retries.sleep_between_retries_ms);
+                setIfField(@TypeOf(wp.*), wp, "retry_on_timeout", cfg.policies.retries.retry_on_timeout);
+                if (@hasField(@TypeOf(wp.*), "commit_level")) wp.commit_level = mapCommitLevel(cfg.policies.write.commit_level);
+                if (@hasField(@TypeOf(wp.*), "generation_policy")) wp.generation_policy = mapGenPolicy(cfg.policies.write.generation_policy);
+                setIfField(@TypeOf(wp.*), wp, "durable_delete", cfg.policies.write.durable_delete);
+                setIfField(@TypeOf(wp.*), wp, "send_key", cfg.policies.write.send_key);
+            }
+
+            if (@hasField(@TypeOf(policies_ptr.*), "batch")) {
+                const bp = &policies_ptr.batch;
+                // Favor total_ms as overall batch timeout
+                setIfField(@TypeOf(bp.*), bp, "total_timeout", cfg.policies.timeouts.total_ms);
+                setIfField(@TypeOf(bp.*), bp, "max_retries", cfg.policies.batch.max_retries);
+                setIfField(@TypeOf(bp.*), bp, "sleep_between_retries", cfg.policies.batch.sleep_between_retries_ms);
+                setIfField(@TypeOf(bp.*), bp, "retry_on_timeout", cfg.policies.retries.retry_on_timeout);
+                setIfField(@TypeOf(bp.*), bp, "allow_inline", cfg.policies.batch.allow_inline);
+                setIfField(@TypeOf(bp.*), bp, "send_set_name", cfg.policies.batch.send_set_name);
+                // concurrency field names vary; try common ones
+                setIfField(@TypeOf(bp.*), bp, "concurrent_max", cfg.policies.batch.max_concurrency);
+                setIfField(@TypeOf(bp.*), bp, "max_concurrent_threads", cfg.policies.batch.max_concurrency);
+            }
+
+            if (@hasField(@TypeOf(policies_ptr.*), "query")) {
+                const qp = &policies_ptr.query;
+                setIfField(@TypeOf(qp.*), qp, "total_timeout", cfg.policies.timeouts.total_ms);
+            }
+
+            if (@hasField(@TypeOf(policies_ptr.*), "scan")) {
+                const sp = &policies_ptr.scan;
+                setIfField(@TypeOf(sp.*), sp, "total_timeout", cfg.policies.timeouts.total_ms);
+            }
+
+            if (@hasField(@TypeOf(policies_ptr.*), "admin")) {
+                const ap = &policies_ptr.admin;
+                setIfField(@TypeOf(ap.*), ap, "total_timeout", cfg.policies.timeouts.total_ms);
+            }
+        }
+    }
+
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) Error!RealClient {
+        // Backward-compat convenience: single seed with default policies
+        const seeds = [_]Seed{.{ .host = host, .port = port }};
+        return connectWithConfig(allocator, &seeds, .{});
+    }
+
+    pub fn connectWithConfig(allocator: std.mem.Allocator, seeds: []const Seed, cfg: Config) Error!RealClient {
         var client: RealClient = .{};
 
-        var cfg: c.as_config = undefined;
-        _ = c.as_config_init(&cfg);
+        var c_cfg: c.as_config = undefined;
+        _ = c.as_config_init(&c_cfg);
 
-        const host_z = try toCStrZ(allocator, host);
-        defer allocator.free(host_z);
-        _ = c.as_config_add_host(&cfg, host_z, port);
+        // Add all seeds
+        var i: usize = 0;
+        while (i < seeds.len) : (i += 1) {
+            const host_z = toCStrZ(allocator, seeds[i].host) catch {
+                // If we cannot allocate, fallback to fail connect cleanly
+                return Error.ConnectionFailed;
+            };
+            defer allocator.free(host_z);
+            _ = c.as_config_add_host(&c_cfg, host_z, seeds[i].port);
+        }
 
-        _ = c.aerospike_init(&client.as, &cfg);
+        // Apply policies and socket settings
+        applyConfig(&c_cfg, cfg);
+
+        _ = c.aerospike_init(&client.as, &c_cfg);
 
         var err: c.as_error = undefined;
         if (c.aerospike_connect(&client.as, &err) != c.AEROSPIKE_OK) {
