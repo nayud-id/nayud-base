@@ -101,6 +101,127 @@ pub const Seed = struct { host: []const u8, port: u16 = 3000 };
 // are not available, provide a no-op stub implementation that compiles.
 pub const Client = if (build_options.aerospike) RealClient else DummyClient;
 
+// Dual-cluster support: independent client pools and per-cluster health tracking.
+pub const HealthStatus = enum { healthy, degraded, down };
+
+pub const ClusterHealth = struct {
+    consecutive_failures: u32 = 0,
+    last_success_ms: u64 = 0,
+    last_error_ms: u64 = 0,
+    status: HealthStatus = .healthy,
+
+    fn recordSuccess(self: *ClusterHealth, now_ms: u64) void {
+        self.consecutive_failures = 0;
+        self.last_success_ms = now_ms;
+        self.status = .healthy;
+    }
+
+    fn recordFailure(self: *ClusterHealth, now_ms: u64) void {
+        self.consecutive_failures += 1;
+        self.last_error_ms = now_ms;
+        // Basic heuristic: 1 failure => degraded, >=3 => down
+        self.status = if (self.consecutive_failures >= 3) .down else .degraded;
+    }
+
+    pub fn snapshot(self: *const ClusterHealth) ClusterHealth {
+        return self.*;
+    }
+};
+
+pub const DualClient = struct {
+    pub const Side = enum { primary, secondary };
+
+    allocator: std.mem.Allocator,
+    primary: Client,
+    secondary: Client,
+    primary_health: ClusterHealth = .{},
+    secondary_health: ClusterHealth = .{},
+    cfg: Config,
+
+    fn nowMs() u64 {
+        // milliTimestamp returns i128; clamp to u64 for storage
+        const ts: i128 = std.time.milliTimestamp();
+        return @intCast(if (ts < 0) 0 else ts);
+    }
+
+    pub fn connect(
+        allocator: std.mem.Allocator,
+        primary_seeds: []const Seed,
+        secondary_seeds: []const Seed,
+        cfg: Config,
+    ) Error!DualClient {
+        if (primary_seeds.len == 0 or secondary_seeds.len == 0) return Error.InvalidArgument;
+
+        var p = try Client.connectWithConfig(allocator, primary_seeds, cfg);
+        errdefer p.close();
+        var s = try Client.connectWithConfig(allocator, secondary_seeds, cfg);
+        errdefer s.close();
+
+        var dc: DualClient = .{
+            .allocator = allocator,
+            .primary = p,
+            .secondary = s,
+            .cfg = cfg,
+        };
+        // Initial health marks as success at creation time
+        const now = nowMs();
+        dc.primary_health.recordSuccess(now);
+        dc.secondary_health.recordSuccess(now);
+        return dc;
+    }
+
+    pub fn close(self: *DualClient) void {
+        self.primary.close();
+        self.secondary.close();
+    }
+
+    pub fn recordResult(self: *DualClient, side: Side, ok: bool) void {
+        const now = nowMs();
+        switch (side) {
+            .primary => if (ok) self.primary_health.recordSuccess(now) else self.primary_health.recordFailure(now),
+            .secondary => if (ok) self.secondary_health.recordSuccess(now) else self.secondary_health.recordFailure(now),
+        }
+    }
+
+    pub fn health(self: *const DualClient) struct { primary: ClusterHealth, secondary: ClusterHealth } {
+        return .{ .primary = self.primary_health, .secondary = self.secondary_health };
+    }
+
+    fn clientPtr(self: *DualClient, side: Side) *Client {
+        return switch (side) {
+            .primary => &self.primary,
+            .secondary => &self.secondary,
+        };
+    }
+
+    pub fn putBoth(self: *DualClient, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, value: Value) Error!void {
+        var err_p: ?Error = null;
+        var err_s: ?Error = null;
+
+        self.primary.put(ns, set, key, bin_name, value) catch |e| {
+            err_p = e;
+        };
+        self.recordResult(.primary, err_p == null);
+
+        self.secondary.put(ns, set, key, bin_name, value) catch |e| {
+            err_s = e;
+        };
+        self.recordResult(.secondary, err_s == null);
+
+        if (err_p != null or err_s != null) return Error.OperationFailed;
+    }
+
+    pub fn getFrom(self: *DualClient, side: Side, ns: []const u8, set: []const u8, key: []const u8) Error!void {
+        var ok = true;
+        self.clientPtr(side).*.get(ns, set, key) catch |e| {
+            // Treat NotFound as a healthy response
+            ok = (e == Error.NotFound);
+            if (!ok) return e;
+        };
+        self.recordResult(side, ok);
+    }
+};
+
 const DummyClient = struct {
     pub fn connect(_: std.mem.Allocator, _: []const u8, _: u16) Error!DummyClient {
         return Error.AerospikeDisabled;
@@ -401,4 +522,4 @@ const RealClient = if (build_options.aerospike) struct {
         // A proper implementation will construct as_query and iterate with callbacks.
         return Error.OperationFailed;
     }
-};
+} else DummyClient;
