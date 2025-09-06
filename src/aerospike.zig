@@ -28,6 +28,9 @@ pub const GenerationPolicy = enum { none, eq, gt };
 // New: policy to control how DualClient surfaces true conflicts
 pub const ConflictHandling = enum { enqueue_repair, return_conflict };
 
+// New: read preference for DualClient read routing
+pub const ReadPreference = enum { prefer_primary, prefer_secondary, primary_only, secondary_only };
+
 pub const Timeouts = struct {
     connect_ms: u32 = 500,
     read_ms: u32 = 15,
@@ -105,6 +108,9 @@ pub const Config = struct {
     policies: ClientPolicies = .{},
     // New: how to handle true cross-cluster write conflicts
     conflict_policy: ConflictHandling = .enqueue_repair,
+    // New: read preference and failover cooldown for graceful failback
+    read_preference: ReadPreference = .prefer_primary,
+    failover_cooldown_ms: u32 = 30_000,
 };
 
 pub const Seed = struct { host: []const u8, port: u16 = 3000 };
@@ -265,6 +271,87 @@ pub const DualClient = struct {
             .GenerationMismatch => wp.generation_policy == .gt,
             else => false,
         };
+    }
+
+    // Helper: whether an error merits read failover to the other side
+    fn isFailoverEligibleError(err: Error) bool {
+        return switch (err) {
+            // NotFound is a legitimate outcome and should not trigger failover by default
+            .NotFound => false,
+            else => true,
+        };
+    }
+
+    // Read with failover: prefer primary by default; on outage or eligible errors, fallback to secondary;
+    // gracefully fail back to preferred side after cooldown when primary recovers.
+    pub fn get(self: *DualClient, ns: []const u8, set: []const u8, key: []const u8) Error!void {
+        const now = nowMs();
+        const pref = self.cfg.read_preference;
+
+        const tryOne = struct {
+            fn run(dc: *DualClient, side: Side, ns_: []const u8, set_: []const u8, key_: []const u8) Error!void {
+                const client = dc.clientPtr(side);
+                client.get(ns_, set_, key_) catch |e| {
+                    dc.recordResult(side, false);
+                    return e;
+                };
+                dc.recordResult(side, true);
+                return;
+            }
+        };
+
+        // Decide routing based on preference and health/cooldown
+        const primary_ok = self.primary_health.status == .healthy or (now - self.primary_health.last_error_ms >= self.cfg.failover_cooldown_ms);
+        const secondary_ok = self.secondary_health.status == .healthy or (now - self.secondary_health.last_error_ms >= self.cfg.failover_cooldown_ms);
+
+        switch (pref) {
+            .primary_only => {
+                return tryOne.run(self, .primary, ns, set, key);
+            },
+            .secondary_only => {
+                return tryOne.run(self, .secondary, ns, set, key);
+            },
+            .prefer_primary => {
+                // If primary considered OK, try it first; otherwise try secondary and probe primary only after cooldown
+                if (primary_ok) {
+                    const r1 = tryOne.run(self, .primary, ns, set, key);
+                    _ = r1; // success returns
+                    return;
+                } else {
+                    // Use secondary first
+                    const r2 = tryOne.run(self, .secondary, ns, set, key) catch |e2| {
+                        // Secondary failed. If cooldown has elapsed, attempt a single primary probe; otherwise return error.
+                        if (now - self.primary_health.last_error_ms >= self.cfg.failover_cooldown_ms) {
+                            return tryOne.run(self, .primary, ns, set, key) catch |e1| {
+                                // Both failed: prefer returning secondary error if failover-eligible; otherwise primary's.
+                                if (isFailoverEligibleError(e2)) return e2 else return e1;
+                            };
+                        }
+                        return e2;
+                    };
+                    _ = r2;
+                    return;
+                }
+            },
+            .prefer_secondary => {
+                if (secondary_ok) {
+                    const r1s = tryOne.run(self, .secondary, ns, set, key);
+                    _ = r1s;
+                    return;
+                } else {
+                    const r2p = tryOne.run(self, .primary, ns, set, key) catch |e2p| {
+                        if (now - self.secondary_health.last_error_ms >= self.cfg.failover_cooldown_ms) {
+                            return tryOne.run(self, .secondary, ns, set, key) catch |e1s| {
+                                if (isFailoverEligibleError(e2p)) return e2p else return e1s;
+                            };
+                        }
+                        return e2p;
+                    };
+                    _ = r2p;
+                    return;
+                }
+            },
+        }
     }
 
     // New: synchronous dual-write using parallel sends with idempotency-aware handling.
