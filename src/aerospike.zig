@@ -8,6 +8,9 @@ pub const Error = error{
     InvalidArgument,
     UnsupportedValueType,
     NotFound,
+    // New generation/idempotency-aware errors
+    RecordExists,
+    GenerationMismatch,
 };
 
 pub const Value = union(enum) {
@@ -21,6 +24,9 @@ pub const Replica = enum { master, any };
 pub const ConsistencyLevel = enum { one, all };
 pub const CommitLevel = enum { commit_all, commit_master };
 pub const GenerationPolicy = enum { none, eq, gt };
+
+// New: policy to control how DualClient surfaces true conflicts
+pub const ConflictHandling = enum { enqueue_repair, return_conflict };
 
 pub const Timeouts = struct {
     connect_ms: u32 = 500,
@@ -41,9 +47,13 @@ pub const ReadPolicy = struct {
     allow_partial_results: bool = false,
 };
 
+// New: expose key_exists_action in the WritePolicy API
+pub const KeyExistsAction = enum { update, replace, create_only, update_only };
+
 pub const WritePolicy = struct {
     commit_level: CommitLevel = .commit_all,
     generation_policy: GenerationPolicy = .none,
+    key_exists_action: KeyExistsAction = .update,
     durable_delete: bool = false,
     send_key: bool = true,
 };
@@ -93,6 +103,8 @@ pub const ClientPolicies = struct {
 pub const Config = struct {
     // Namespaces/sets are app-level and not included here; this is transport + policy config.
     policies: ClientPolicies = .{},
+    // New: how to handle true cross-cluster write conflicts
+    conflict_policy: ConflictHandling = .enqueue_repair,
 };
 
 pub const Seed = struct { host: []const u8, port: u16 = 3000 };
@@ -237,7 +249,27 @@ pub const DualClient = struct {
         };
     }
 
-    // New: synchronous dual-write using parallel sends. Require both ACKs for success.
+    fn dup(self: *DualClient, s: []const u8) ![]u8 {
+        const buf = try self.allocator.alloc(u8, s.len);
+        std.mem.copy(u8, buf, s);
+        return buf;
+    }
+
+    // Helper: determine if an error represents an idempotent retry outcome under current write policy
+    fn isIdempotentRetry(self: *DualClient, err: Error) bool {
+        const wp = self.cfg.policies.write;
+        return switch (err) {
+            // If caller used create_only and we observe RecordExists on retry, the prior write likely succeeded
+            .RecordExists => wp.key_exists_action == .create_only,
+            // If using generation GT semantics, a generation mismatch implies a newer write already applied
+            .GenerationMismatch => wp.generation_policy == .gt,
+            else => false,
+        };
+    }
+
+    // New: synchronous dual-write using parallel sends with idempotency-aware handling.
+    // Aligns with namespace last-update-time policy: we accept idempotent retry outcomes
+    // and deterministically route true conflicts based on cfg.conflict_policy.
     pub fn putBoth(self: *DualClient, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, value: Value) Error!void {
         const ThreadResult = struct { ok: bool = false, err: ?Error = null };
         var r_p: ThreadResult = .{};
@@ -264,9 +296,34 @@ pub const DualClient = struct {
         self.recordResult(.primary, r_p.ok);
         self.recordResult(.secondary, r_s.ok);
 
+        // Fast-path success
         if (r_p.ok and r_s.ok) return;
 
-        // If partial failure, enqueue repair for the side that failed
+        // Idempotent retry cases: one or both sides indicate prior success under current write policy
+        const p_idem = if (!r_p.ok and r_p.err) |e| self.isIdempotentRetry(e) else false;
+        const s_idem = if (!r_s.ok and r_s.err) |e| self.isIdempotentRetry(e) else false;
+
+        if ((r_p.ok and s_idem) or (r_s.ok and p_idem) or (p_idem and s_idem)) {
+            // Treat as overall success: one side succeeded now and the other reflects prior success
+            return;
+        }
+
+        // True conflict detection: generation EQ mismatch is considered a conflict that needs deterministic handling
+        const wp = self.cfg.policies.write;
+        const p_conflict = (!r_p.ok and r_p.err == Error.GenerationMismatch and wp.generation_policy == .eq);
+        const s_conflict = (!r_s.ok and r_s.err == Error.GenerationMismatch and wp.generation_policy == .eq);
+        if (p_conflict or s_conflict) {
+            switch (self.cfg.conflict_policy) {
+                .enqueue_repair => {
+                    if (p_conflict) self.enqueueRepairPut(.primary, ns, set, key, bin_name, value, r_p.err orelse Error.OperationFailed);
+                    if (s_conflict) self.enqueueRepairPut(.secondary, ns, set, key, bin_name, value, r_s.err orelse Error.OperationFailed);
+                    return Error.OperationFailed;
+                },
+                .return_conflict => return Error.GenerationMismatch,
+            }
+        }
+
+        // Fallback: partial failure => enqueue repair for the side that failed (non-idempotent errors)
         if (r_p.ok and !r_s.ok) {
             self.enqueueRepairPut(.secondary, ns, set, key, bin_name, value, r_s.err orelse Error.OperationFailed);
         } else if (!r_p.ok and r_s.ok) {
@@ -276,7 +333,9 @@ pub const DualClient = struct {
         return Error.OperationFailed;
     }
 
-    // New: synchronous dual-operate (increment) using parallel sends. Require both ACKs.
+    // New: synchronous dual-operate (increment) using parallel sends with idempotency/conflict handling.
+    // Note: increments are not naturally idempotent; when using generation GT, a mismatch may indicate
+    // the prior increment has already been applied. Under EQ, a mismatch is treated as a true conflict.
     pub fn operateIncrBoth(self: *DualClient, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, delta: i64) Error!void {
         const ThreadResult = struct { ok: bool = false, err: ?Error = null };
         var r_p: ThreadResult = .{};
@@ -304,6 +363,27 @@ pub const DualClient = struct {
 
         if (r_p.ok and r_s.ok) return;
 
+        const wp2 = self.cfg.policies.write;
+        const p_idem = (!r_p.ok and r_p.err == Error.GenerationMismatch and wp2.generation_policy == .gt);
+        const s_idem = (!r_s.ok and r_s.err == Error.GenerationMismatch and wp2.generation_policy == .gt);
+        if ((r_p.ok and s_idem) or (r_s.ok and p_idem) or (p_idem and s_idem)) {
+            // Accept as idempotent retry under GT semantics
+            return;
+        }
+
+        const p_conflict = (!r_p.ok and r_p.err == Error.GenerationMismatch and wp2.generation_policy == .eq);
+        const s_conflict = (!r_s.ok and r_s.err == Error.GenerationMismatch and wp2.generation_policy == .eq);
+        if (p_conflict or s_conflict) {
+            switch (self.cfg.conflict_policy) {
+                .enqueue_repair => {
+                    if (p_conflict) self.enqueueRepairIncr(.primary, ns, set, key, bin_name, delta, r_p.err orelse Error.OperationFailed);
+                    if (s_conflict) self.enqueueRepairIncr(.secondary, ns, set, key, bin_name, delta, r_s.err orelse Error.OperationFailed);
+                    return Error.OperationFailed;
+                },
+                .return_conflict => return Error.GenerationMismatch,
+            }
+        }
+
         if (r_p.ok and !r_s.ok) {
             self.enqueueRepairIncr(.secondary, ns, set, key, bin_name, delta, r_s.err orelse Error.OperationFailed);
         } else if (!r_p.ok and r_s.ok) {
@@ -311,22 +391,6 @@ pub const DualClient = struct {
         }
 
         return Error.OperationFailed;
-    }
-
-    pub fn getFrom(self: *DualClient, side: Side, ns: []const u8, set: []const u8, key: []const u8) Error!void {
-        var ok = true;
-        self.clientPtr(side).*.get(ns, set, key) catch |e| {
-            // Treat NotFound as a healthy response
-            ok = (e == Error.NotFound);
-            if (!ok) return e;
-        };
-        self.recordResult(side, ok);
-    }
-
-    fn dup(self: *DualClient, s: []const u8) ![]u8 {
-        const buf = try self.allocator.alloc(u8, s.len);
-        std.mem.copy(u8, buf, s);
-        return buf;
     }
 
     fn enqueueRepairPut(self: *DualClient, failed_side: Side, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, value: Value, err: Error) void {
@@ -410,10 +474,17 @@ const DummyClient = struct {
     pub fn put(_: *DummyClient, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: Value) Error!void {
         return Error.AerospikeDisabled;
     }
+    // New generation-aware API stubs for no-op client
+    pub fn putWithGen(_: *DummyClient, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: Value, _: u32, _: GenerationPolicy) Error!void {
+        return Error.AerospikeDisabled;
+    }
     pub fn get(_: *DummyClient, _: []const u8, _: []const u8, _: []const u8) Error!void {
         return Error.AerospikeDisabled;
     }
     pub fn operateIncr(_: *DummyClient, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: i64) Error!void {
+        return Error.AerospikeDisabled;
+    }
+    pub fn operateIncrWithGen(_: *DummyClient, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: i64, _: u32, _: GenerationPolicy) Error!void {
         return Error.AerospikeDisabled;
     }
     pub fn batchGet(_: *DummyClient, _: []const u8, _: []const u8, _: [][]const u8) Error!void {
@@ -484,6 +555,16 @@ const RealClient = if (build_options.aerospike) struct {
         };
     }
 
+    // New: map key_exists_action to Aerospike C enum
+    fn mapKeyExistsAction(kea: KeyExistsAction) c.as_policy_exists {
+        return switch (kea) {
+            .update => c.AS_POLICY_EXISTS_IGNORE,
+            .replace => c.AS_POLICY_EXISTS_REPLACE,
+            .create_only => c.AS_POLICY_EXISTS_CREATE_ONLY,
+            .update_only => c.AS_POLICY_EXISTS_UPDATE_ONLY,
+        };
+    }
+
     fn applyConfig(c_cfg: *c.as_config, cfg: Config) void {
         // Socket/global settings
         setIfField(@TypeOf(c_cfg.*), c_cfg, "conn_timeout_ms", cfg.policies.timeouts.connect_ms);
@@ -517,6 +598,9 @@ const RealClient = if (build_options.aerospike) struct {
                 setIfField(@TypeOf(wp.*), wp, "retry_on_timeout", cfg.policies.retries.retry_on_timeout);
                 if (@hasField(@TypeOf(wp.*), "commit_level")) wp.commit_level = mapCommitLevel(cfg.policies.write.commit_level);
                 if (@hasField(@TypeOf(wp.*), "generation_policy")) wp.generation_policy = mapGenPolicy(cfg.policies.write.generation_policy);
+                // Support both potential field names from C headers: 'key_exists_action' and 'exists'
+                if (@hasField(@TypeOf(wp.*), "key_exists_action")) @field(wp.*, "key_exists_action") = mapKeyExistsAction(cfg.policies.write.key_exists_action);
+                if (@hasField(@TypeOf(wp.*), "exists")) @field(wp.*, "exists") = mapKeyExistsAction(cfg.policies.write.key_exists_action);
                 setIfField(@TypeOf(wp.*), wp, "durable_delete", cfg.policies.write.durable_delete);
                 setIfField(@TypeOf(wp.*), wp, "send_key", cfg.policies.write.send_key);
             }
@@ -625,6 +709,51 @@ const RealClient = if (build_options.aerospike) struct {
 
         if (c.aerospike_key_put(&self.as, &err, null, &akey, &rec) != c.AEROSPIKE_OK) {
             _ = c.as_record_destroy(&rec);
+            // Map Aerospike status codes to generation-aware errors
+            if (err.code == c.AEROSPIKE_ERR_RECORD_EXISTS) return Error.RecordExists;
+            if (err.code == c.AEROSPIKE_ERR_RECORD_GENERATION) return Error.GenerationMismatch;
+            return Error.OperationFailed;
+        }
+        _ = c.as_record_destroy(&rec);
+    }
+
+    // New: generation-aware put with expected_generation using per-operation write policy
+    pub fn putWithGen(self: *RealClient, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, value: Value, expected_generation: u32, gen_policy: GenerationPolicy) Error!void {
+        if (!self.connected) return Error.OperationFailed;
+        var err: c.as_error = undefined;
+
+        const ns_z = try toCStrZ(std.heap.page_allocator, ns);
+        defer std.heap.page_allocator.free(ns_z);
+        const set_z = try toCStrZ(std.heap.page_allocator, set);
+        defer std.heap.page_allocator.free(set_z);
+        const key_z = try toCStrZ(std.heap.page_allocator, key);
+        defer std.heap.page_allocator.free(key_z);
+        const bin_z = try toCStrZ(std.heap.page_allocator, bin_name);
+        defer std.heap.page_allocator.free(bin_z);
+
+        var akey: c.as_key = undefined;
+        _ = c.as_key_init_str(&akey, ns_z, set_z, key_z);
+
+        var rec: c.as_record = undefined;
+        _ = c.as_record_inita(&rec, 1);
+
+        switch (value) {
+            .int => |v| {
+                _ = c.as_record_set_int64(&rec, bin_z, v);
+            },
+        }
+
+        var wp: c.as_policy_write = undefined;
+        _ = c.as_policy_write_init(&wp);
+        // Set generation semantics
+        wp.generation = expected_generation;
+        wp.generation_policy = mapGenPolicy(gen_policy);
+
+        if (c.aerospike_key_put(&self.as, &err, &wp, &akey, &rec) != c.AEROSPIKE_OK) {
+            _ = c.as_record_destroy(&rec);
+            if (err.code == c.AEROSPIKE_ERR_RECORD_EXISTS) return Error.RecordExists;
+            if (err.code == c.AEROSPIKE_ERR_RECORD_GENERATION) return Error.GenerationMismatch;
+            if (err.code == c.AEROSPIKE_ERR_RECORD_NOT_FOUND) return Error.NotFound;
             return Error.OperationFailed;
         }
         _ = c.as_record_destroy(&rec);
@@ -647,6 +776,8 @@ const RealClient = if (build_options.aerospike) struct {
         var rec: ?*c.as_record = null;
         if (c.aerospike_key_get(&self.as, &err, null, &akey, &rec) != c.AEROSPIKE_OK) {
             if (err.code == c.AEROSPIKE_ERR_RECORD_NOT_FOUND) return Error.NotFound;
+            if (err.code == c.AEROSPIKE_ERR_RECORD_EXISTS) return Error.RecordExists; // unlikely for get, but included for completeness
+            if (err.code == c.AEROSPIKE_ERR_RECORD_GENERATION) return Error.GenerationMismatch; // likewise
             return Error.OperationFailed;
         }
         if (rec) |r| {
@@ -678,6 +809,48 @@ const RealClient = if (build_options.aerospike) struct {
         if (c.aerospike_key_operate(&self.as, &err, null, &akey, &ops, &rec) != c.AEROSPIKE_OK) {
             _ = c.as_operations_destroy(&ops);
             if (rec) |_| _ = c.as_record_destroy(rec.?);
+            if (err.code == c.AEROSPIKE_ERR_RECORD_NOT_FOUND) return Error.NotFound;
+            if (err.code == c.AEROSPIKE_ERR_RECORD_EXISTS) return Error.RecordExists;
+            if (err.code == c.AEROSPIKE_ERR_RECORD_GENERATION) return Error.GenerationMismatch;
+            return Error.OperationFailed;
+        }
+        _ = c.as_operations_destroy(&ops);
+        if (rec) |r| _ = c.as_record_destroy(r);
+    }
+
+    // New: generation-aware increment using per-operation operate policy
+    pub fn operateIncrWithGen(self: *RealClient, ns: []const u8, set: []const u8, key: []const u8, bin_name: []const u8, delta: i64, expected_generation: u32, gen_policy: GenerationPolicy) Error!void {
+        if (!self.connected) return Error.OperationFailed;
+        var err: c.as_error = undefined;
+
+        const ns_z = try toCStrZ(std.heap.page_allocator, ns);
+        defer std.heap.page_allocator.free(ns_z);
+        const set_z = try toCStrZ(std.heap.page_allocator, set);
+        defer std.heap.page_allocator.free(set_z);
+        const key_z = try toCStrZ(std.heap.page_allocator, key);
+        defer std.heap.page_allocator.free(key_z);
+        const bin_z = try toCStrZ(std.heap.page_allocator, bin_name);
+        defer std.heap.page_allocator.free(bin_z);
+
+        var akey: c.as_key = undefined;
+        _ = c.as_key_init_str(&akey, ns_z, set_z, key_z);
+
+        var ops: c.as_operations = undefined;
+        _ = c.as_operations_inita(&ops, 1);
+        _ = c.as_operations_add_incr(&ops, bin_z, delta);
+
+        var op_pol: c.as_policy_operate = undefined;
+        _ = c.as_policy_operate_init(&op_pol);
+        op_pol.generation = expected_generation;
+        op_pol.generation_policy = mapGenPolicy(gen_policy);
+
+        var rec: ?*c.as_record = null;
+        if (c.aerospike_key_operate(&self.as, &err, &op_pol, &akey, &ops, &rec) != c.AEROSPIKE_OK) {
+            _ = c.as_operations_destroy(&ops);
+            if (rec) |_| _ = c.as_record_destroy(rec.?);
+            if (err.code == c.AEROSPIKE_ERR_RECORD_NOT_FOUND) return Error.NotFound;
+            if (err.code == c.AEROSPIKE_ERR_RECORD_EXISTS) return Error.RecordExists;
+            if (err.code == c.AEROSPIKE_ERR_RECORD_GENERATION) return Error.GenerationMismatch;
             return Error.OperationFailed;
         }
         _ = c.as_operations_destroy(&ops);
