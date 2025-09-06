@@ -111,6 +111,12 @@ pub const Config = struct {
     // New: read preference and failover cooldown for graceful failback
     read_preference: ReadPreference = .prefer_primary,
     failover_cooldown_ms: u32 = 30_000,
+    // Task16: health controller knobs
+    health_probe_interval_ms: u32 = 1_000, // base probe period when healthy
+    breaker_down_threshold: u32 = 3,       // failures to consider cluster down
+    backoff_initial_ms: u32 = 1_000,       // starting backoff when degraded/down
+    backoff_max_ms: u32 = 30_000,          // upper bound for exponential backoff
+    failback_hysteresis_ms: u32 = 30_000,  // stable window before failing back
 };
 
 pub const Seed = struct { host: []const u8, port: u16 = 3000 };
@@ -193,6 +199,19 @@ pub const DualClient = struct {
     repair_queue: std.ArrayList(RepairItem),
     mutex: std.Thread.Mutex = .{},
 
+    // Task16: health controller state
+    health_mutex: std.Thread.Mutex = .{},
+    controller_thread: ?std.Thread = null,
+    controller_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    active_override: ?Side = null, // when set, force reads to this side until cleared
+    last_failover_ms: u64 = 0,
+    // Probe context (owned strings)
+    probe_ns: ?[]u8 = null,
+    probe_set: ?[]u8 = null,
+    // Probe cadence tracking
+    last_probe_primary_ms: u64 = 0,
+    last_probe_secondary_ms: u64 = 0,
+
     const MAX_REPAIR_QUEUE: usize = 4096;
 
     fn nowMs() u64 {
@@ -229,6 +248,12 @@ pub const DualClient = struct {
     }
 
     pub fn close(self: *DualClient) void {
+        // Stop controller and free probe strings
+        self.stopHealthController();
+        if (self.probe_ns) |ns| self.allocator.free(ns);
+        self.probe_ns = null;
+        if (self.probe_set) |st| self.allocator.free(st);
+        self.probe_set = null;
         // Free queued repair items
         self.freeRepairQueue();
         self.repair_queue.deinit();
@@ -238,9 +263,30 @@ pub const DualClient = struct {
 
     pub fn recordResult(self: *DualClient, side: Side, ok: bool) void {
         const now = nowMs();
+        self.health_mutex.lock();
+        defer self.health_mutex.unlock();
         switch (side) {
             .primary => if (ok) self.primary_health.recordSuccess(now) else self.primary_health.recordFailure(now),
             .secondary => if (ok) self.secondary_health.recordSuccess(now) else self.secondary_health.recordFailure(now),
+        }
+        // Apply configurable breaker thresholds
+        if (!ok) {
+            switch (side) {
+                .primary => {
+                    if (self.primary_health.consecutive_failures >= self.cfg.breaker_down_threshold) {
+                        self.primary_health.status = .down;
+                    } else if (self.primary_health.consecutive_failures > 0) {
+                        self.primary_health.status = .degraded;
+                    }
+                },
+                .secondary => {
+                    if (self.secondary_health.consecutive_failures >= self.cfg.breaker_down_threshold) {
+                        self.secondary_health.status = .down;
+                    } else if (self.secondary_health.consecutive_failures > 0) {
+                        self.secondary_health.status = .degraded;
+                    }
+                },
+            }
         }
     }
 
@@ -283,10 +329,18 @@ pub const DualClient = struct {
     }
 
     // Read with failover: prefer primary by default; on outage or eligible errors, fallback to secondary;
-    // gracefully fail back to preferred side after cooldown when primary recovers.
     pub fn get(self: *DualClient, ns: []const u8, set: []const u8, key: []const u8) Error!void {
         const now = nowMs();
-        const pref = self.cfg.read_preference;
+        var pref = self.cfg.read_preference;
+        // Task16: enforce active_override when present
+        if (self.active_override) |ov| {
+            switch (pref) {
+                .prefer_primary, .prefer_secondary => {
+                    pref = switch (ov) { .primary => .primary_only, .secondary => .secondary_only };
+                },
+                else => {},
+            }
+        }
 
         const tryOne = struct {
             fn run(dc: *DualClient, side: Side, ns_: []const u8, set_: []const u8, key_: []const u8) Error!void {
