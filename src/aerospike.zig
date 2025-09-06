@@ -117,6 +117,8 @@ pub const Config = struct {
     backoff_initial_ms: u32 = 1_000,       // starting backoff when degraded/down
     backoff_max_ms: u32 = 30_000,          // upper bound for exponential backoff
     failback_hysteresis_ms: u32 = 30_000,  // stable window before failing back
+    // Task17: durable repair queue directory (relative to process cwd)
+    repair_dir: []const u8 = "repair_queue",
 };
 
 pub const Seed = struct { host: []const u8, port: u16 = 3000 };
@@ -144,6 +146,8 @@ pub const RepairItem = struct {
     key: []u8,
     op: RepairOp,
     err: Error,
+    // Task17: persistence metadata
+    attempts: u32 = 0,
 
     pub fn deinit(self: *RepairItem, allocator: std.mem.Allocator) void {
         allocator.free(self.ns);
@@ -154,6 +158,85 @@ pub const RepairItem = struct {
             .incr => |*i| allocator.free(i.bin_name),
         }
     }
+
+    // Serialize to a compact binary format with length-prefix strings
+    pub fn serialize(self: *const RepairItem, allocator: std.mem.Allocator) ![]u8 {
+        var buf = std.ArrayList(u8).init(allocator);
+        errdefer buf.deinit();
+        var w = buf.writer();
+        try w.writeIntLittle(u64, self.ts_ms);
+        try w.writeByte(@intFromEnum(self.failed_side));
+        try w.writeByte(@intFromEnum(self.op)); // op tag
+        try w.writeByte(@intFromEnum(self.err));
+        try w.writeIntLittle(u32, self.attempts);
+        // ns, set, key
+        try w.writeIntLittle(u32, @intCast(self.ns.len));
+        try w.writeAll(self.ns);
+        try w.writeIntLittle(u32, @intCast(self.set.len));
+        try w.writeAll(self.set);
+        try w.writeIntLittle(u32, @intCast(self.key.len));
+        try w.writeAll(self.key);
+        // op payload
+        switch (self.op) {
+            .put => |p| {
+                try w.writeIntLittle(u32, @intCast(p.bin_name.len));
+                try w.writeAll(p.bin_name);
+                // value: only int variant currently
+                try w.writeByte(0); // value tag: int
+                try w.writeIntLittle(i64, p.value.int);
+            },
+            .incr => |i| {
+                try w.writeIntLittle(u32, @intCast(i.bin_name.len));
+                try w.writeAll(i.bin_name);
+                try w.writeIntLittle(i64, i.delta);
+            },
+        }
+        return buf.toOwnedSlice();
+    }
+
+    pub fn deserialize(allocator: std.mem.Allocator, data: []const u8) !RepairItem {
+        var s = std.io.fixedBufferStream(data);
+        const r = s.reader();
+        var item: RepairItem = undefined;
+        item.ts_ms = try r.readIntLittle(u64);
+        const side_tag = try r.readByte();
+        item.failed_side = @enumFromInt(side_tag);
+        const op_tag: u8 = try r.readByte();
+        const err_tag: u8 = try r.readByte();
+        item.err = @enumFromInt(err_tag);
+        item.attempts = try r.readIntLittle(u32);
+        const ns_len = try r.readIntLittle(u32);
+        const ns = try allocator.alloc(u8, ns_len);
+        try r.readNoEof(ns);
+        const set_len = try r.readIntLittle(u32);
+        const set = try allocator.alloc(u8, set_len);
+        try r.readNoEof(set);
+        const key_len = try r.readIntLittle(u32);
+        const key = try allocator.alloc(u8, key_len);
+        try r.readNoEof(key);
+        item.ns = ns;
+        item.set = set;
+        item.key = key;
+        switch (op_tag) {
+            0 => { // put
+                const bn_len = try r.readIntLittle(u32);
+                const bn = try allocator.alloc(u8, bn_len);
+                try r.readNoEof(bn);
+                _ = try r.readByte(); // value tag (only int supported for now)
+                const vint = try r.readIntLittle(i64);
+                item.op = .{ .put = .{ .bin_name = bn, .value = .{ .int = vint } } };
+            },
+            1 => { // incr
+                const bn_len = try r.readIntLittle(u32);
+                const bn = try allocator.alloc(u8, bn_len);
+                try r.readNoEof(bn);
+                const d = try r.readIntLittle(i64);
+                item.op = .{ .incr = .{ .bin_name = bn, .delta = d } };
+            },
+            else => return error.InvalidArgument,
+        }
+        return item;
+    }
 };
 
 // Select implementation based on build flag. When Aerospike C client headers/libs
@@ -162,6 +245,14 @@ pub const Client = if (build_options.aerospike) RealClient else DummyClient;
 
 // Dual-cluster support: independent client pools and per-cluster health tracking.
 pub const HealthStatus = enum { healthy, degraded, down };
+
+// Task17: public metrics snapshot for repair queue/reconciler
+pub const RepairMetrics = struct {
+    enqueued: u64,
+    succeeded: u64,
+    failed: u64,
+    pending: usize,
+};
 
 pub const ClusterHealth = struct {
     consecutive_failures: u32 = 0,
@@ -212,6 +303,14 @@ pub const DualClient = struct {
     last_probe_primary_ms: u64 = 0,
     last_probe_secondary_ms: u64 = 0,
 
+    // Task17: durable queue state and metrics
+    repair_dir_fd: ?std.fs.Dir = null,
+    repairs_enqueued: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    repairs_succeeded: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    repairs_failed: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    reconciler_thread: ?std.Thread = null,
+    reconciler_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     const MAX_REPAIR_QUEUE: usize = 4096;
 
     fn nowMs() u64 {
@@ -244,21 +343,166 @@ pub const DualClient = struct {
         const now = nowMs();
         dc.primary_health.recordSuccess(now);
         dc.secondary_health.recordSuccess(now);
+        // Task17: init durable queue dir, load, and start reconciler
+        try dc.initRepairDir();
+        try dc.loadRepairsFromDisk();
+        // caller can start reconciler explicitly via startReconciler()
         return dc;
     }
 
     pub fn close(self: *DualClient) void {
         // Stop controller and free probe strings
         self.stopHealthController();
+        // Task17: stop reconciler and close repair dir
+        self.stopReconciler();
+        if (self.repair_dir_fd) |*dir| dir.close();
+        self.repair_dir_fd = null;
         if (self.probe_ns) |ns| self.allocator.free(ns);
         self.probe_ns = null;
         if (self.probe_set) |st| self.allocator.free(st);
         self.probe_set = null;
-        // Free queued repair items
         self.freeRepairQueue();
         self.repair_queue.deinit();
         self.primary.close();
         self.secondary.close();
+    }
+
+    // (removed duplicate enqueueRepair; see later definition)
+
+    // Task17: durable queue helpers and reconciler
+    fn initRepairDir(self: *DualClient) !void {
+        var cwd = std.fs.cwd();
+        cwd.makeDir(self.cfg.repair_dir) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return e,
+        };
+        self.repair_dir_fd = try cwd.openDir(self.cfg.repair_dir, .{ .iterate = true, .access_sub_paths = true });
+    }
+
+    fn persistRepair(self: *DualClient, item: *const RepairItem) !void {
+        if (self.repair_dir_fd == null) return; // best-effort
+        const dir = self.repair_dir_fd.?;
+        var name_buf: [128]u8 = undefined;
+        const ts = item.ts_ms;
+        const rand = @as(u64, @intCast(std.time.microTimestamp() & 0xffff));
+        const fname = try std.fmt.bufPrint(&name_buf, "{d}-{d}.rep", .{ ts, rand });
+        var file = try dir.createFile(fname, .{ .read = true, .truncate = true });
+        defer file.close();
+        const blob = try item.serialize(self.allocator);
+        defer self.allocator.free(blob);
+        try file.writeAll(blob);
+        self.repairs_enqueued.store(self.repairs_enqueued.load(.monotonic) + 1, .monotonic);
+    }
+
+    fn deletePersisted(self: *DualClient, fname: []const u8) void {
+        if (self.repair_dir_fd) |*dir| {
+            dir.deleteFile(fname) catch {};
+        }
+    }
+
+    fn loadRepairsFromDisk(self: *DualClient) !void {
+        if (self.repair_dir_fd == null) return;
+        var it = self.repair_dir_fd.?.iterate();
+        while (try it.next()) |ent| {
+            if (ent.kind != .file) continue;
+            if (!std.mem.endsWith(u8, ent.name, ".rep")) continue;
+            const contents = try self.repair_dir_fd.?.readFileAlloc(self.allocator, ent.name, 1 << 20);
+            defer self.allocator.free(contents);
+            const item = RepairItem.deserialize(self.allocator, contents) catch |e| {
+                _ = e; // skip unreadable item
+                continue;
+            };
+            try self.repair_queue.append(item);
+        }
+        self.logBacklogIfHigh();
+    }
+
+    fn tryRepair(self: *DualClient, item: *RepairItem) Error!void {
+        const target: *Client = switch (item.failed_side) {
+            .primary => &self.primary,
+            .secondary => &self.secondary,
+        };
+        switch (item.op) {
+            .put => |p| try target.put(item.ns, item.set, item.key, p.bin_name, p.value),
+            .incr => |i| try target.operateIncr(item.ns, item.set, item.key, i.bin_name, i.delta),
+        }
+    }
+
+    fn reconcilerLoop(self: *DualClient) void {
+        const base_backoff = self.cfg.backoff_initial_ms;
+        const max_backoff = self.cfg.backoff_max_ms;
+        var sleep_ms: u64 = base_backoff;
+        while (!self.reconciler_stop.load(.monotonic)) {
+            if (self.nextRepair()) |item| {
+                var owned = item; // copy
+                // ensure persisted exists prior to attempt
+                self.persistRepair(&owned) catch {};
+                const res = self.tryRepair(&owned);
+                if (res) |err| {
+                    _ = err;
+                    owned.attempts += 1;
+                    self.mutex.lock();
+                    self.repair_queue.append(owned) catch {
+                        owned.deinit(self.allocator);
+                    };
+                    self.mutex.unlock();
+                    self.repairs_failed.store(self.repairs_failed.load(.monotonic) + 1, .monotonic);
+                    sleep_ms = @min(max_backoff, sleep_ms * 2);
+                } else {
+                    self.repairs_succeeded.store(self.repairs_succeeded.load(.monotonic) + 1, .monotonic);
+                    // delete one persisted with ts prefix
+                    if (self.repair_dir_fd) |*dir| {
+                        var it = dir.iterate();
+                        var prefix_buf: [64]u8 = undefined;
+                        const prefix = std.fmt.bufPrint(&prefix_buf, "{d}-", .{ owned.ts_ms }) catch "";
+                        while (it.next() catch null) |ent| {
+                            if (ent.kind != .file) continue;
+                            if (std.mem.startsWith(u8, ent.name, prefix) and std.mem.endsWith(u8, ent.name, ".rep")) {
+                                dir.deleteFile(ent.name) catch {};
+                                break;
+                            }
+                        }
+                    }
+                    owned.deinit(self.allocator);
+                    sleep_ms = base_backoff;
+                }
+            } else {
+                // Idle
+                std.time.sleep(@as(u64, @intCast(base_backoff)) * std.time.ns_per_ms);
+                if (sleep_ms > base_backoff) sleep_ms = @max(base_backoff, sleep_ms / 2);
+            }
+        }
+    }
+
+    pub fn startReconciler(self: *DualClient) !void {
+        if (self.reconciler_thread != null) return;
+        self.reconciler_stop.store(false, .monotonic);
+        self.reconciler_thread = try std.Thread.spawn(.{}, DualClient.reconcilerLoop, .{ self });
+    }
+
+    pub fn stopReconciler(self: *DualClient) void {
+        if (self.reconciler_thread) |t| {
+            self.reconciler_stop.store(true, .monotonic);
+            t.join();
+            self.reconciler_thread = null;
+        }
+    }
+
+    fn logBacklogIfHigh(self: *DualClient) void {
+        const n = self.pendingRepairs();
+        if (n > (MAX_REPAIR_QUEUE / 2)) {
+            std.log.warn("High repair backlog: {d}/{d}", .{ n, MAX_REPAIR_QUEUE });
+        }
+    }
+
+    // Task17: expose metrics snapshot
+    pub fn repairMetrics(self: *DualClient) RepairMetrics {
+        return .{
+            .enqueued = self.repairs_enqueued.load(.monotonic),
+            .succeeded = self.repairs_succeeded.load(.monotonic),
+            .failed = self.repairs_failed.load(.monotonic),
+            .pending = self.pendingRepairs(),
+        };
     }
 
     pub fn recordResult(self: *DualClient, side: Side, ok: bool) void {
@@ -336,7 +580,10 @@ pub const DualClient = struct {
         if (self.active_override) |ov| {
             switch (pref) {
                 .prefer_primary, .prefer_secondary => {
-                    pref = switch (ov) { .primary => .primary_only, .secondary => .secondary_only };
+                    pref = switch (ov) {
+                        .primary => .primary_only,
+                        .secondary => .secondary_only,
+                    };
                 },
                 else => {},
             }
@@ -575,6 +822,10 @@ pub const DualClient = struct {
             old.deinit(self.allocator);
         }
         try self.repair_queue.append(item);
+        // best-effort persist and backlog alert
+        const last = &self.repair_queue.items[self.repair_queue.items.len - 1];
+        self.persistRepair(last) catch {};
+        self.logBacklogIfHigh();
     }
 
     pub fn nextRepair(self: *DualClient) ?RepairItem {
