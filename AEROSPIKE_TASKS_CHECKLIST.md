@@ -54,7 +54,9 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
 - ☑ Design 3–5 node CE cluster topology (separate AZs/racks if possible)
   - Added: src/infra/aerospike/topology.zig (Placement, Node, Topology; validate(), seeds(); constructors threeNode/fourNode/fiveNode)
   - Re-exported via src/infra/mod.zig as infra.aerospike.topology for modular access
-- ☐ Namespace plan: in-memory with persistence enabled (storage-engine memory + device persistence)
+- ☑ Namespace plan: in-memory with persistence enabled (storage-engine memory + device persistence)
+  - Added: src/infra/aerospike/nsplan.zig (NamespacePlan, Device, validate(), renderPseudoConf(); singleDevice constructor)
+  - Re-exported via src/infra/aerospike/mod.zig as infra.aerospike.nsplan for modular access
 - ☐ Set replication-factor >= 2 for HA
 - ☐ Configure heartbeat (mesh or multicast), fabric, and migrate threads
 - ☐ Configure durable writes (commit-to-device, write-commit-level, stop-writes-pct)
