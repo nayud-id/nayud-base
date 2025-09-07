@@ -2,3 +2,5 @@
 .vscode
 .zig-cache
 zig-out
+.tool-versions
+.zig-version

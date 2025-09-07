@@ -15,7 +15,7 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
 ---
 
 ## 1) Foundation: Toolchain, Targets, Structure
-- ☐ Lock Zig version policy (add .tool-versions or .zig-version alongside build.zig.zon minimum_zig_version)
+- ☑ Lock Zig version policy (add .tool-versions or .zig-version alongside build.zig.zon minimum_zig_version)
 - ☐ Confirm supported OS/CPU matrix (macOS x86_64/aarch64, Linux x86_64/aarch64) and document
 - ☐ Restrict build targets in build.zig (standardTargetOptions constraints) if needed
 - ☐ Ensure build.zig.zon minimum_zig_version matches policy and CI
