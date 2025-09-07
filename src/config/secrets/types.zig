@@ -20,4 +20,11 @@ pub const Secrets = struct {
     pub fn toStringRedacted(_: Secrets) []const u8 {
         return "Secrets(user=***, password=***, tls=***)";
     }
+
+    /// Compile-time guard: disallow formatting/printing of Secrets via std.fmt/std.debug.
+    /// If someone attempts to `print("{any}", .{secrets})`, this triggers a compile error
+    /// instructing to use redacted helpers instead.
+    pub fn format(_: Secrets, comptime _: []const u8, _: std.fmt.FormatOptions, _: anytype) !void {
+        @compileError("Printing Secrets is forbidden. Use Secrets.toStringRedacted() or security.redaction utilities.");
+    }
 };
