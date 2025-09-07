@@ -4,6 +4,7 @@ const std = @import("std");
 // Responsibility: configuration types and future loaders (CLI > env > file > defaults).
 
 pub const paths = @import("paths.zig");
+pub const secrets = @import("secrets/mod.zig");
 
 pub const Source = enum { cli, env, file, defaults };
 

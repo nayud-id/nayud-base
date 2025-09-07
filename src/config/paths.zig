@@ -9,5 +9,8 @@ pub const secure_dir: []const u8 = "config/secure";
 /// - Loaders will reference this constant (implemented in a later task)
 pub const secrets_path: []const u8 = "config/secure/secrets.zig";
 
+/// Optional env-style secrets file for runtime parsing (no compile-time import).
+pub const secrets_env_path: []const u8 = "config/secure/secrets.env";
+
 /// The tracked template file developers should copy locally to secrets_path.
 pub const secrets_template_path: []const u8 = "config/secure/secrets.zig.example";
