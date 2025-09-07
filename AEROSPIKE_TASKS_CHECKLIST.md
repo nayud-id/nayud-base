@@ -51,7 +51,9 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
 ---
 
 ## 3) Aerospike Cluster Topology (CE) — In-memory with persistence
-- ☐ Design 3–5 node CE cluster topology (separate AZs/racks if possible)
+- ☑ Design 3–5 node CE cluster topology (separate AZs/racks if possible)
+  - Added: src/infra/aerospike/topology.zig (Placement, Node, Topology; validate(), seeds(); constructors threeNode/fourNode/fiveNode)
+  - Re-exported via src/infra/mod.zig as infra.aerospike.topology for modular access
 - ☐ Namespace plan: in-memory with persistence enabled (storage-engine memory + device persistence)
 - ☐ Set replication-factor >= 2 for HA
 - ☐ Configure heartbeat (mesh or multicast), fabric, and migrate threads
