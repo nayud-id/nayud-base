@@ -64,7 +64,10 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
   - Added: src/infra/aerospike/net/fabric.zig (FabricConfig with validate, renderInto())
   - Added: src/infra/aerospike/service/migrate.zig (MigrateConfig with validate, renderInto())
   - Re-exported via src/infra/aerospike/net/mod.zig and src/infra/aerospike/service/mod.zig; top-level via src/infra/aerospike/mod.zig as infra.aerospike.net and infra.aerospike.service
-- ☐ Configure durable writes (commit-to-device, write-commit-level, stop-writes-pct)
+- ☑ Configure durable writes (commit-to-device, write-commit-level, stop-writes-pct)
+  - Added: src/infra/aerospike/namespace/durable_writes.zig (DurableWritesConfig with validate(), renderInto())
+  - Integrated into NamespacePlan via src/infra/aerospike/nsplan.zig: durable field and rendering under namespace block
+  - Re-exported via src/infra/aerospike/namespace/mod.zig and top-level src/infra/aerospike/mod.zig as infra.aerospike.namespace
 - ☐ Set TTL/default-ttl, eviction, defrag, nsup-period
 - ☐ Plan rack-awareness / rack-id if multi-rack
 - ☐ Define seed nodes for client bootstrap

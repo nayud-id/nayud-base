@@ -1,4 +1,5 @@
 const std = @import("std");
+const namespace = @import("namespace/mod.zig");
 
 /// Errors for namespace planning and validation.
 pub const Errors = error{
@@ -31,6 +32,8 @@ pub const NamespacePlan = struct {
     devices: []const Device,
     /// Replication factor for HA (must be >= 2)
     replication_factor: u8 = 2,
+    /// Durable writes tuning (stop-writes-pct, commit-to-device, write-commit-level)
+    durable: namespace.durable_writes.DurableWritesConfig = .{},
 
     /// Validate the plan for common mistakes and safety checks.
     pub fn validate(self: NamespacePlan) Errors!void {
@@ -38,6 +41,8 @@ pub const NamespacePlan = struct {
         if (self.memory_size == 0) return Errors.SizeZero;
         if (self.devices.len == 0) return Errors.MissingDevices;
         if (self.replication_factor < 2) return Errors.ReplicationTooLow;
+        // Validate durable writes policy as part of the plan
+        try self.durable.validate();
 
         // Ensure unique device paths and non-zero sizes.
         var i: usize = 0;
@@ -63,6 +68,8 @@ pub const NamespacePlan = struct {
         try writer.print("    storage-engine memory\n", .{});
         try writer.print("    replication-factor {}\n", .{self.replication_factor});
         try writer.print("    memory-size {} # bytes\n", .{self.memory_size});
+        // Durable writes block
+        try self.durable.renderInto(writer, "    ");
         try writer.print("    # Persistence devices (translate to file/device stanzas as appropriate)\n", .{});
         for (self.devices) |d| {
             try writer.print("    device \"{s}\" {} # bytes\n", .{ d.path, d.size_bytes });
@@ -78,5 +85,6 @@ pub fn singleDevice(name: []const u8, memory_size: u64, device_path: []const u8,
         .memory_size = memory_size,
         .devices = &.{.{ .path = device_path, .size_bytes = device_size }},
         // replication_factor left as default (2) for HA
+        .durable = .{},
     };
 }
