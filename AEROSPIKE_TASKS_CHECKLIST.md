@@ -43,7 +43,7 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
 - ☑ Define single authoritative secrets file path (e.g., config/secure/secrets.zig) excluded from VCS
   - Added: src/config/paths.zig with secrets_path = "config/secure/secrets.zig" (re-exported via src/config/mod.zig); already gitignored by config/secure/.gitignore
 - ☑ Implement secrets loader module (no logs, no fmt printing, sanitize on error) — Added: runtime env-file parser + env fallback, strict sanitized errors; no logging; centralized paths & types.
-- ☐ Implement redaction utilities for logging (e.g., redact(key), redactAll(map))
+- ☑ Implement redaction utilities for logging (e.g., redact(key), redactAll(map)) — Added: src/security/redaction/mod.zig (MASK, redact, writePairsRedacted, redactAll); re-exported via src/security/mod.zig
 - ☐ Add compile-time guard preventing accidental debug prints of secrets
 - ☐ Document secure handling (rotation, local-only storage, backups off-repo)
 

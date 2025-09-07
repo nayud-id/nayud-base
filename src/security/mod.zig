@@ -10,3 +10,5 @@ pub fn redact(_: []const u8) []const u8 {
 pub const Guards = struct {
     // Compile-time guards can be added here later (e.g., disallow secret prints).
 };
+
+pub const redaction = @import("redaction/mod.zig");
