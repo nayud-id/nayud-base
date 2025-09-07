@@ -22,15 +22,16 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
     - Linux: x86_64, aarch64
 - ☑ Restrict build targets in build.zig (standardTargetOptions constraints) if needed
   - Enforcement: src/build/target_matrix.zig -> ensureSupportedTarget()
-- ☐ Ensure build.zig.zon minimum_zig_version matches policy and CI
-- ☐ Establish modular folder structure:
-  - ☐ src/config/
-  - ☐ src/security/
-  - ☐ src/db/
-  - ☐ src/db/aerospike/
-  - ☐ src/observability/
-  - ☐ src/tests/
-  - ☐ src/infra/
+- ☑ Ensure build.zig.zon minimum_zig_version matches policy
+  - Verified: .tool-versions → zig 0.15.1; build.zig.zon → minimum_zig_version = "0.15.1"
+- ☑ Establish modular folder structure:
+  - ☑ src/config/ (scaffold: src/config/mod.zig)
+  - ☑ src/security/ (scaffold: src/security/mod.zig)
+  - ☑ src/db/ (scaffold: src/db/mod.zig)
+  - ☑ src/db/aerospike/ (scaffold: src/db/aerospike/client.zig)
+  - ☑ src/observability/ (scaffold: src/observability/mod.zig)
+  - ☑ src/tests/ (scaffold: src/tests/mod.zig)
+  - ☑ src/infra/ (scaffold: src/infra/mod.zig)
 
 ---
 
