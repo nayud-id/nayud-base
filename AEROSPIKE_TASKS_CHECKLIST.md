@@ -36,7 +36,8 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
 ---
 
 ## 2) Secrets & Sensitive Config (Single safest file)
-- ☐ Create config/secure/.gitignore (ignore real secrets file)
+- ☑ Create config/secure/.gitignore (ignore real secrets file)
+  - Added: strict ignore for secrets.zig and generic secrets/cert/env patterns; allowlisted secrets.zig.example
 - ☐ Add config/secure/secrets.zig.example (template only)
 - ☐ Define single authoritative secrets file path (e.g., config/secure/secrets.zig) excluded from VCS
 - ☐ Implement secrets loader module (no logs, no fmt printing, sanitize on error)

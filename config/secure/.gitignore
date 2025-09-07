@@ -1,0 +1,40 @@
+# Secrets directory ignore rules
+# Only track templates/examples; NEVER commit real secrets.
+
+# Authoritative real secrets file (excluded from VCS)
+secrets.zig
+
+# Generic secrets patterns (block by default)
+secrets.*
+*.secrets
+*.secrets.*
+
+# Common credential/certificate/key material
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*.pfx
+*.p12
+*.jks
+*.kdb
+*.sth
+*.srl
+*.csr
+*.ovpn
+*.enc
+*.gpg
+*.asc
+*.keystore
+*.truststore
+
+# Environment files
+.env
+.env.*
+*.env
+*.env.*
+
+# Allowlisted templates/examples (tracked)
+!secrets.zig.example
+!README.md
