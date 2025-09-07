@@ -59,7 +59,11 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
   - Re-exported via src/infra/aerospike/mod.zig as infra.aerospike.nsplan for modular access
 - ☑ Set replication-factor >= 2 for HA
   - Added: replication_factor field (default 2) with validation and render in pseudo-conf via src/infra/aerospike/nsplan.zig (NamespacePlan)
-- ☐ Configure heartbeat (mesh or multicast), fabric, and migrate threads
+- ☑ Configure heartbeat (mesh or multicast), fabric, and migrate threads
+  - Added: src/infra/aerospike/net/heartbeat.zig (HeartbeatConfig with mesh/multicast, zero-alloc validate, renderInto())
+  - Added: src/infra/aerospike/net/fabric.zig (FabricConfig with validate, renderInto())
+  - Added: src/infra/aerospike/service/migrate.zig (MigrateConfig with validate, renderInto())
+  - Re-exported via src/infra/aerospike/net/mod.zig and src/infra/aerospike/service/mod.zig; top-level via src/infra/aerospike/mod.zig as infra.aerospike.net and infra.aerospike.service
 - ☐ Configure durable writes (commit-to-device, write-commit-level, stop-writes-pct)
 - ☐ Set TTL/default-ttl, eviction, defrag, nsup-period
 - ☐ Plan rack-awareness / rack-id if multi-rack
