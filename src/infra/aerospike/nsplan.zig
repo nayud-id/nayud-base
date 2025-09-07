@@ -6,6 +6,7 @@ pub const Errors = error{
     SizeZero,
     MissingDevices,
     DuplicateDevice,
+    ReplicationTooLow,
 };
 
 /// Persistence device descriptor (path + size in bytes).
@@ -28,12 +29,15 @@ pub const NamespacePlan = struct {
     memory_size: u64,
     /// One or more persistence devices/files
     devices: []const Device,
+    /// Replication factor for HA (must be >= 2)
+    replication_factor: u8 = 2,
 
     /// Validate the plan for common mistakes and safety checks.
     pub fn validate(self: NamespacePlan) Errors!void {
         if (self.name.len == 0) return Errors.InvalidName;
         if (self.memory_size == 0) return Errors.SizeZero;
         if (self.devices.len == 0) return Errors.MissingDevices;
+        if (self.replication_factor < 2) return Errors.ReplicationTooLow;
 
         // Ensure unique device paths and non-zero sizes.
         var i: usize = 0;
@@ -57,6 +61,7 @@ pub const NamespacePlan = struct {
         try writer.print("namespace {s} {{\n", .{self.name});
         try writer.print("    # In-memory namespace with persistence to device(s)\n", .{});
         try writer.print("    storage-engine memory\n", .{});
+        try writer.print("    replication-factor {}\n", .{self.replication_factor});
         try writer.print("    memory-size {} # bytes\n", .{self.memory_size});
         try writer.print("    # Persistence devices (translate to file/device stanzas as appropriate)\n", .{});
         for (self.devices) |d| {
@@ -72,5 +77,6 @@ pub fn singleDevice(name: []const u8, memory_size: u64, device_path: []const u8,
         .name = name,
         .memory_size = memory_size,
         .devices = &.{.{ .path = device_path, .size_bytes = device_size }},
+        // replication_factor left as default (2) for HA
     };
 }

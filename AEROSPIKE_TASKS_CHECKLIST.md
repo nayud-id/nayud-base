@@ -57,7 +57,8 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
 - ☑ Namespace plan: in-memory with persistence enabled (storage-engine memory + device persistence)
   - Added: src/infra/aerospike/nsplan.zig (NamespacePlan, Device, validate(), renderPseudoConf(); singleDevice constructor)
   - Re-exported via src/infra/aerospike/mod.zig as infra.aerospike.nsplan for modular access
-- ☐ Set replication-factor >= 2 for HA
+- ☑ Set replication-factor >= 2 for HA
+  - Added: replication_factor field (default 2) with validation and render in pseudo-conf via src/infra/aerospike/nsplan.zig (NamespacePlan)
 - ☐ Configure heartbeat (mesh or multicast), fabric, and migrate threads
 - ☐ Configure durable writes (commit-to-device, write-commit-level, stop-writes-pct)
 - ☐ Set TTL/default-ttl, eviction, defrag, nsup-period
