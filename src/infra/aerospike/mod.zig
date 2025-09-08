@@ -7,3 +7,4 @@ pub const service = @import("service/mod.zig");
 pub const namespace = @import("namespace/mod.zig");
 pub const bootstrap = @import("bootstrap/mod.zig");
 pub const config = @import("config/mod.zig");
+pub const conf = @import("conf/mod.zig");

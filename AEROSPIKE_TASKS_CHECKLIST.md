@@ -98,7 +98,10 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
   - Added: src/infra/aerospike/config/namespace.zig (NamespaceKnobs: stop-writes-pct, commit-to-device, write-commit-level, default-ttl, evict-pct, defrag-sleep, defrag-threshold, nsup-period, replication-factor, storage-engine, device)
   - Added: src/infra/aerospike/config/mod.zig and re-exported via src/infra/aerospike/mod.zig as infra.aerospike.config
   - Design: DRY, zero-alloc (static slices), modular files <300 LOC each; mirrors existing renderers/structs
-- ☐ Provide a clean conf template (aerospike.conf) for dev/test
+- ☑ Provide a clean conf template (aerospike.conf) for dev/test
+  - Added: src/infra/aerospike/conf/dev.zig (DevTemplate.renderInto() composing service.migrate, service.rack, net.heartbeat, net.fabric, nsplan.singleDevice; zero-alloc, DRY)
+  - Added: src/infra/aerospike/conf/mod.zig and re-exported via src/infra/aerospike/mod.zig as infra.aerospike.conf
+  - Design: modular files (<300 LOC), reuse existing renderers, caller-controlled seeds/devices; suitable defaults for dev/test
 - ☐ Provide production conf template with performance and durability focus
 - ☐ Document CE vs. EE feature boundaries and chosen mitigations
 - ☐ Define config validation checklist (lint/verify before apply)
