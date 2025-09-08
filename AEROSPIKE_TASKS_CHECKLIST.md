@@ -111,7 +111,13 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
   - Added folder: ce-vs-ee/ with modular docs: overview.md, features.md, limits.md, mitigations.md
   - Sources: Aerospike features & editions matrix, system limits; guidance includes CE-safe mitigations and ops patterns
   - Design: DRY, categorized by topic; each file <300 LOC; no duplication across docs
-- ☐ Define config validation checklist (lint/verify before apply)
+- ☑ Define config validation checklist (lint/verify before apply)
+  - Added: src/infra/aerospike/validate/ with modular files: basic.zig, cross.zig, checklist.zig, mod.zig
+  - Basic: aggregates existing validate() from topology, heartbeat, fabric, migrate, seed_list, nsplan (DRY, zero-alloc)
+  - Cross: checks seeds count vs node count, replication-factor <= nodes, and rack coverage vs replication-factor
+  - Orchestrator: provides a run() routine for strict linting and a human-readable checklist renderer for ops visibility
+  - Exported via src/infra/aerospike/mod.zig; zig build OK
+  - Design: modular files <300 LOC, no duplicated logic; adheres to DRY
 
 ---
 
