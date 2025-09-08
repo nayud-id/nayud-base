@@ -81,7 +81,12 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
   - Integrated hint into NamespacePlan via src/infra/aerospike/nsplan.zig: rack field with validation and render under namespace block
   - Added helper in src/infra/aerospike/topology.zig: annotateWithRacks(top, cfg, writer) for ops visibility
   - Zero-alloc, modular, DRY; files kept <300 LOC
-- ☐ Define seed nodes for client bootstrap
+- ☑ Define seed nodes for client bootstrap
+  - Added: src/infra/aerospike/bootstrap/seed_list.zig (SeedList with validate(), renderInto(), writeFromTopology(), fillFromTopology(); reuses net.heartbeat.HostPort to stay DRY)
+  - Added: src/infra/aerospike/bootstrap/mod.zig and re-exported via src/infra/aerospike/mod.zig as infra.aerospike.bootstrap
+  - Integrated into client scaffold via src/db/aerospike/client.zig: Bootstrap struct with seeds and render helper
+  - Convenience helper in src/infra/aerospike/topology.zig: writeClientSeeds() to emit seeds from a Topology
+  - Zero-alloc, modular, file sizes <300 LOC; no duplication of HostPort or seed parsing logic
 
 ---
 

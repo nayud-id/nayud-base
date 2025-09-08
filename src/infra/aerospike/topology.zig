@@ -86,14 +86,29 @@ pub fn fiveNode(allocator: std.mem.Allocator, hosts: []const []const u8) Errors!
 
 const service = @import("service/mod.zig");
 
-pub fn annotateWithRacks(top: Topology, cfg: service.rack.RackConfig, out: anytype) !void {
-    // Writes lines: Node(id=.., host=.., rack-id=..|unknown)
-    try cfg.validate();
+pub fn annotateWithRacks(writer: anytype, cfg: service.rack.RackConfig, top: Topology) !void {
+    // Zero-alloc walkthrough: list nodes with optional rack-id when enabled
+    try writer.writeAll("# Topology with rack annotations\n");
     for (top.nodes) |n| {
-        if (cfg.rackIdFor(n.host)) |rid| {
-            try out.print("Node(id={}, host={s}:{}, rack-id={})\n", .{ n.id, n.host, n.port, rid });
-        } else {
-            try out.print("Node(id={}, host={s}:{}, rack-id=unknown)\n", .{ n.id, n.host, n.port });
+        try writer.print("- {any}", .{n});
+        if (cfg.enabled) {
+            if (cfg.rackIdFor(n.host)) |rid| {
+                try writer.print(" (rack={})", .{rid});
+            }
         }
+        try writer.writeByte('\n');
     }
+}
+
+/// Render client seeds line from topology for convenience.
+pub fn writeClientSeeds(writer: anytype, indent: []const u8, top: Topology) !void {
+    try writer.print("{s}# Client bootstrap seeds derived from topology\n", .{indent});
+    try writer.print("{s}seeds ", .{indent});
+    var first = true;
+    for (top.nodes) |n| {
+        if (!first) try writer.writeAll(", ");
+        first = false;
+        try writer.print("{s}:{}", .{ n.host, n.port });
+    }
+    try writer.writeByte('\n');
 }
