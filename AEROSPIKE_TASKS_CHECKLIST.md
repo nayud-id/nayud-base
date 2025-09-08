@@ -68,7 +68,13 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
   - Added: src/infra/aerospike/namespace/durable_writes.zig (DurableWritesConfig with validate(), renderInto())
   - Integrated into NamespacePlan via src/infra/aerospike/nsplan.zig: durable field and rendering under namespace block
   - Re-exported via src/infra/aerospike/namespace/mod.zig and top-level src/infra/aerospike/mod.zig as infra.aerospike.namespace
-- ☐ Set TTL/default-ttl, eviction, defrag, nsup-period
+- ☑ Set TTL/default-ttl, eviction, defrag, nsup-period
+  - Added: src/infra/aerospike/namespace/ttl.zig (TTLConfig with validate(), renderInto())
+  - Added: src/infra/aerospike/namespace/eviction.zig (EvictionConfig with validate(), renderInto())
+  - Added: src/infra/aerospike/namespace/defrag.zig (DefragConfig with validate(), renderInto())
+  - Added: src/infra/aerospike/namespace/nsup.zig (NsupConfig with validate(), renderInto())
+  - Integrated into NamespacePlan via src/infra/aerospike/nsplan.zig: ttl, eviction, defrag, nsup fields and rendering under namespace block
+  - Re-exported via src/infra/aerospike/namespace/mod.zig and top-level src/infra/aerospike/mod.zig as infra.aerospike.namespace
 - ☐ Plan rack-awareness / rack-id if multi-rack
 - ☐ Define seed nodes for client bootstrap
 

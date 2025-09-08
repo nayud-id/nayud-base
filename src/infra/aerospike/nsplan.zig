@@ -34,6 +34,14 @@ pub const NamespacePlan = struct {
     replication_factor: u8 = 2,
     /// Durable writes tuning (stop-writes-pct, commit-to-device, write-commit-level)
     durable: namespace.durable_writes.DurableWritesConfig = .{},
+    /// TTL policy
+    ttl: namespace.ttl.TTLConfig = .{},
+    /// Eviction policy
+    eviction: namespace.eviction.EvictionConfig = .{},
+    /// Defrag tuning
+    defrag: namespace.defrag.DefragConfig = .{},
+    /// NSUP period tuning
+    nsup: namespace.nsup.NsupConfig = .{},
 
     /// Validate the plan for common mistakes and safety checks.
     pub fn validate(self: NamespacePlan) Errors!void {
@@ -41,8 +49,12 @@ pub const NamespacePlan = struct {
         if (self.memory_size == 0) return Errors.SizeZero;
         if (self.devices.len == 0) return Errors.MissingDevices;
         if (self.replication_factor < 2) return Errors.ReplicationTooLow;
-        // Validate durable writes policy as part of the plan
+        // Validate subcomponents
         try self.durable.validate();
+        try self.ttl.validate();
+        try self.eviction.validate();
+        try self.defrag.validate();
+        try self.nsup.validate();
 
         // Ensure unique device paths and non-zero sizes.
         var i: usize = 0;
@@ -67,9 +79,13 @@ pub const NamespacePlan = struct {
         try writer.print("    # In-memory namespace with persistence to device(s)\n", .{});
         try writer.print("    storage-engine memory\n", .{});
         try writer.print("    replication-factor {}\n", .{self.replication_factor});
-        try writer.print("    memory-size {} # bytes\n", .{self.memory_size});
         // Durable writes block
         try self.durable.renderInto(writer, "    ");
+        // TTL/eviction/defrag/nsup
+        try self.ttl.renderInto(writer, "    ");
+        try self.eviction.renderInto(writer, "    ");
+        try self.defrag.renderInto(writer, "    ");
+        try self.nsup.renderInto(writer, "    ");
         try writer.print("    # Persistence devices (translate to file/device stanzas as appropriate)\n", .{});
         for (self.devices) |d| {
             try writer.print("    device \"{s}\" {} # bytes\n", .{ d.path, d.size_bytes });
@@ -86,5 +102,9 @@ pub fn singleDevice(name: []const u8, memory_size: u64, device_path: []const u8,
         .devices = &.{.{ .path = device_path, .size_bytes = device_size }},
         // replication_factor left as default (2) for HA
         .durable = .{},
+        .ttl = .{},
+        .eviction = .{},
+        .defrag = .{},
+        .nsup = .{},
     };
 }
