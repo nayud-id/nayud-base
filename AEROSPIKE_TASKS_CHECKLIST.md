@@ -102,7 +102,11 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
   - Added: src/infra/aerospike/conf/dev.zig (DevTemplate.renderInto() composing service.migrate, service.rack, net.heartbeat, net.fabric, nsplan.singleDevice; zero-alloc, DRY)
   - Added: src/infra/aerospike/conf/mod.zig and re-exported via src/infra/aerospike/mod.zig as infra.aerospike.conf
   - Design: modular files (<300 LOC), reuse existing renderers, caller-controlled seeds/devices; suitable defaults for dev/test
-- ☐ Provide production conf template with performance and durability focus
+- ☑ Provide production conf template with performance and durability focus
+  - Added: src/infra/aerospike/conf/prod.zig (ProdTemplate.renderInto() composing service.rack, service.migrate, net.heartbeat, net.fabric, nsplan.singleDevice; production-leaning defaults for threads, RF, stop-writes-pct)
+  - Updated: src/infra/aerospike/conf/mod.zig to export prod template (infra.aerospike.conf.prod)
+  - Build: zig build OK
+  - Notes: DRY composition; zero-alloc; caller adjusts seeds, rack assignments, device sizing/paths; defaults tuned toward performance & durability
 - ☐ Document CE vs. EE feature boundaries and chosen mitigations
 - ☐ Define config validation checklist (lint/verify before apply)
 
