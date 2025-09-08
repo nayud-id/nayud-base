@@ -83,3 +83,17 @@ pub fn fiveNode(allocator: std.mem.Allocator, hosts: []const []const u8) Errors!
     for (hosts, 0..) |h, i| nodes[i] = .{ .id = @intCast(i + 1), .host = h, .placement = placements[i] };
     return .{ .nodes = nodes };
 }
+
+const service = @import("service/mod.zig");
+
+pub fn annotateWithRacks(top: Topology, cfg: service.rack.RackConfig, out: anytype) !void {
+    // Writes lines: Node(id=.., host=.., rack-id=..|unknown)
+    try cfg.validate();
+    for (top.nodes) |n| {
+        if (cfg.rackIdFor(n.host)) |rid| {
+            try out.print("Node(id={}, host={s}:{}, rack-id={})\n", .{ n.id, n.host, n.port, rid });
+        } else {
+            try out.print("Node(id={}, host={s}:{}, rack-id=unknown)\n", .{ n.id, n.host, n.port });
+        }
+    }
+}

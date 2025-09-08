@@ -75,7 +75,12 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
   - Added: src/infra/aerospike/namespace/nsup.zig (NsupConfig with validate(), renderInto())
   - Integrated into NamespacePlan via src/infra/aerospike/nsplan.zig: ttl, eviction, defrag, nsup fields and rendering under namespace block
   - Re-exported via src/infra/aerospike/namespace/mod.zig and top-level src/infra/aerospike/mod.zig as infra.aerospike.namespace
-- ☐ Plan rack-awareness / rack-id if multi-rack
+- ☑ Plan rack-awareness / rack-id if multi-rack
+  - Added: src/infra/aerospike/service/rack.zig (RackConfig, HostRack; validate(), rackIdFor(), distinctRackCount(), renderServiceForHost(), renderNamespaceHint())
+  - Re-exported via src/infra/aerospike/service/mod.zig as infra.aerospike.service.rack
+  - Integrated hint into NamespacePlan via src/infra/aerospike/nsplan.zig: rack field with validation and render under namespace block
+  - Added helper in src/infra/aerospike/topology.zig: annotateWithRacks(top, cfg, writer) for ops visibility
+  - Zero-alloc, modular, DRY; files kept <300 LOC
 - ☐ Define seed nodes for client bootstrap
 
 ---

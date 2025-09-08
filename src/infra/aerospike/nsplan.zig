@@ -1,5 +1,6 @@
 const std = @import("std");
 const namespace = @import("namespace/mod.zig");
+const service = @import("service/mod.zig");
 
 /// Errors for namespace planning and validation.
 pub const Errors = error{
@@ -42,6 +43,8 @@ pub const NamespacePlan = struct {
     defrag: namespace.defrag.DefragConfig = .{},
     /// NSUP period tuning
     nsup: namespace.nsup.NsupConfig = .{},
+    /// Rack-awareness planner (namespace hint + per-node rack-id via service config)
+    rack: service.rack.RackConfig = .{},
 
     /// Validate the plan for common mistakes and safety checks.
     pub fn validate(self: NamespacePlan) Errors!void {
@@ -55,6 +58,7 @@ pub const NamespacePlan = struct {
         try self.eviction.validate();
         try self.defrag.validate();
         try self.nsup.validate();
+        try self.rack.validate();
 
         // Ensure unique device paths and non-zero sizes.
         var i: usize = 0;
@@ -86,6 +90,8 @@ pub const NamespacePlan = struct {
         try self.eviction.renderInto(writer, "    ");
         try self.defrag.renderInto(writer, "    ");
         try self.nsup.renderInto(writer, "    ");
+        // Rack-aware namespace hint (commented unless supported)
+        try self.rack.renderNamespaceHint(writer, "    ");
         try writer.print("    # Persistence devices (translate to file/device stanzas as appropriate)\n", .{});
         for (self.devices) |d| {
             try writer.print("    device \"{s}\" {} # bytes\n", .{ d.path, d.size_bytes });
