@@ -91,7 +91,13 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
 ---
 
 ## 4) Server Configuration Surfaces (Maximize explicit params)
-- ☐ Enumerate all relevant global, network, and namespace config knobs
+- ☑ Enumerate all relevant global, network, and namespace config knobs
+  - Added: src/infra/aerospike/config/types.zig (Scope, ValueKind, Knob descriptors + renderKnobList())
+  - Added: src/infra/aerospike/config/global.zig (GlobalKnobs: migrate.threads, migrate.sleep-us, rack-id)
+  - Added: src/infra/aerospike/config/network.zig (NetworkKnobs: heartbeat.*, fabric.*) reusing existing net modules for keys
+  - Added: src/infra/aerospike/config/namespace.zig (NamespaceKnobs: stop-writes-pct, commit-to-device, write-commit-level, default-ttl, evict-pct, defrag-sleep, defrag-threshold, nsup-period, replication-factor, storage-engine, device)
+  - Added: src/infra/aerospike/config/mod.zig and re-exported via src/infra/aerospike/mod.zig as infra.aerospike.config
+  - Design: DRY, zero-alloc (static slices), modular files <300 LOC each; mirrors existing renderers/structs
 - ☐ Provide a clean conf template (aerospike.conf) for dev/test
 - ☐ Provide production conf template with performance and durability focus
 - ☐ Document CE vs. EE feature boundaries and chosen mitigations
