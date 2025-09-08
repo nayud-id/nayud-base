@@ -107,7 +107,10 @@ Legend: ☐ = pending, ☑ = done, 🔒 security, ⚙️ config, 🧪 test, 🚀
   - Updated: src/infra/aerospike/conf/mod.zig to export prod template (infra.aerospike.conf.prod)
   - Build: zig build OK
   - Notes: DRY composition; zero-alloc; caller adjusts seeds, rack assignments, device sizing/paths; defaults tuned toward performance & durability
-- ☐ Document CE vs. EE feature boundaries and chosen mitigations
+- ☑ Document CE vs. EE feature boundaries and chosen mitigations
+  - Added folder: ce-vs-ee/ with modular docs: overview.md, features.md, limits.md, mitigations.md
+  - Sources: Aerospike features & editions matrix, system limits; guidance includes CE-safe mitigations and ops patterns
+  - Design: DRY, categorized by topic; each file <300 LOC; no duplication across docs
 - ☐ Define config validation checklist (lint/verify before apply)
 
 ---
